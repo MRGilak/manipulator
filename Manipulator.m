@@ -17,6 +17,16 @@ classdef Manipulator < handle
         % Visualization
         visual
         graphics
+        
+        % Center of mass
+        comOffset  % 3xn matrix: vector from frame i to COM of link i
+        
+        % Dynamic properties
+        mass       % 1xn vector: mass of each link
+        inertia    % 3x3xn array: inertia matrix of each link in its frame
+        g0         % Gravity constant (default: 9810 mm/s^2)
+        J_prev     % Previous COM Jacobian for computing J_dot
+        dt_prev    % Previous time step for J_dot computation
     end
 
     methods
@@ -71,6 +81,27 @@ classdef Manipulator < handle
             obj.visual.frameSize = 100;  % Length of frame axes
             obj.visual.showFrames = true;
             obj.visual.showLabels = true;
+            
+            % End-effector visualization
+            obj.visual.showEndEffector = true;
+            obj.visual.endEffectorSize = 80;  % Size of end-effector
+            obj.visual.endEffectorType = 'gripper';  % 'gripper', 'tool', 'sphere'
+            obj.visual.endEffectorColor = [0.3 0.3 0.3];  % Dark gray
+            
+            % Center of mass offsets (default: at frame origin)
+            obj.comOffset = zeros(3, obj.n);
+            
+            % Dynamic properties (defaults)
+            obj.mass = ones(1, obj.n);  % Unit mass
+            obj.inertia = zeros(3, 3, obj.n);
+            for i = 1:obj.n
+                obj.inertia(:,:,i) = eye(3);  % Unit inertia
+            end
+            obj.g0 = 9810;  % mm/s^2
+            
+            % Jacobian derivative computation
+            obj.J_prev = [];
+            obj.dt_prev = 0.05;  % Default time step
 
             obj.graphics = struct();
         end
@@ -152,6 +183,213 @@ classdef Manipulator < handle
                     p = T(1:3,4);
                 end
             end
+        end
+
+        %% Full Jacobian combining linear and angular velocities
+        function J = jacobian(obj, frameIdx)
+            % Get full 6xn Jacobian matrix [Jv; Jw]
+            % frameIdx: index of the frame (default is end-effector)
+            if nargin < 2
+                frameIdx = obj.n;
+            end
+            Jv = obj.jacobianLinear(frameIdx);
+            Jw = obj.jacobianOmega(frameIdx);
+            J = [Jv; Jw];
+        end
+        
+        %% COM Jacobian for center of mass of a link
+        function J_C = jacobianCOM(obj, linkIdx)
+            % Compute Jacobian for center of mass of link
+            % J_C = [I, S(r_CD); 0, I] * J_D
+            % where r_CD is vector from COM to frame on that link
+            % and J_D is the geometric Jacobian at that frame
+            if nargin < 2
+                linkIdx = obj.n;
+            end
+            
+            % Get geometric Jacobian at frame linkIdx
+            J_D = obj.jacobian(linkIdx);
+            
+            % Get COM offset for this link
+            r_CD = obj.comOffset(:, linkIdx);
+            
+            % Build transformation matrix
+            I3 = eye(3);
+            S_r = obj.skew(r_CD);
+            T_CD = [I3, S_r; zeros(3,3), I3];
+            
+            % Compute COM Jacobian
+            J_C = T_CD * J_D;
+        end
+        
+        %% Mass-Inertia matrix M (6n x 6n)
+        function M = massMatrix(obj)
+            % Build 6n x 6n mass-inertia matrix
+            n6 = 6 * obj.n;
+            M = zeros(n6, n6);
+            
+            for i = 1:obj.n
+                % Top-left quarter: mass * identity
+                idx = (i-1)*3 + (1:3);
+                M(idx, idx) = obj.mass(i) * eye(3);
+                
+                % Bottom-right quarter: inertia matrix
+                idx_rot = 3*obj.n + (i-1)*3 + (1:3);
+                M(idx_rot, idx_rot) = obj.inertia(:,:,i);
+            end
+        end
+        
+        %% Coriolis matrix S (6n x 6n)
+        function S = coriolisMatrix(obj)
+            % Build 6n x 6n coriolis/centrifugal matrix
+            n6 = 6 * obj.n;
+            S = zeros(n6, n6);
+            
+            for i = 1:obj.n
+                % Get angular velocity for link i
+                Jw = obj.jacobianOmega(i);
+                omega_i = Jw * obj.qdot;
+                
+                % Compute I_i * omega_i
+                I_omega = obj.inertia(:,:,i) * omega_i;
+                
+                % Bottom-right quarter: -S(I_i * omega_i)
+                idx = 3*obj.n + (i-1)*3 + (1:3);
+                S(idx, idx) = -obj.skew(I_omega);
+            end
+        end
+        
+        %% Gravity vector g (6n x 1)
+        function g = gravityVector(obj)
+            % Build 6n x 1 gravity vector
+            n6 = 6 * obj.n;
+            g = zeros(n6, 1);
+            
+            for i = 1:obj.n
+                % Top half: gravity force
+                idx = (i-1)*3 + (1:3);
+                g(idx) = [0; 0; obj.g0] * obj.mass(i);
+            end
+        end
+        
+        %% Stacked COM Jacobian for all links (6n x n)
+        function J_all = jacobianCOM_all(obj)
+            J_all = zeros(6*obj.n, obj.n);
+            
+            for i = 1:obj.n
+                % Get COM Jacobian for link i
+                J_C = obj.jacobianCOM(i);
+                
+                % Split into linear and angular 
+                J_v = J_C(1:3, :);
+                J_omega = J_C(4:6, :);
+                
+                % Top half: stack linear velocity Jacobians
+                idx_v = (i-1)*3 + (1:3);
+                J_all(idx_v, :) = J_v;
+                
+                % Get rotation matrix from base to frame i
+                T_i = obj.fk(i);
+                R_i = T_i(1:3, 1:3);
+                
+                idx_omega = 3*obj.n + (i-1)*3 + (1:3);
+                J_all(idx_omega, :) = R_i' * J_omega;  % R^(-1) = R^T for rotation matrix
+            end
+        end
+        
+        %% Time derivative of stacked COM Jacobian (6n x n)
+        function J_dot = jacobianCOM_dot(obj, dt)
+            % Compute numerical derivative of COM Jacobian
+            % Uses finite difference
+            if nargin < 2
+                dt = obj.dt_prev;
+            end
+            
+            J_current = obj.jacobianCOM_all();
+            
+            if isempty(obj.J_prev) || size(obj.J_prev,1) ~= size(J_current,1)
+                % First call or dimension mismatch - initialize
+                J_dot = zeros(size(J_current));
+                obj.J_prev = J_current;
+            else
+                % Compute finite difference
+                J_dot = (J_current - obj.J_prev) / dt;
+                obj.J_prev = J_current;
+            end
+            
+            obj.dt_prev = dt;
+        end
+        
+        %% Inertia matrix D (n x n)
+        function D = inertiaMatrix(obj)
+            % Compute D = J^T * M * J
+            J = obj.jacobianCOM_all();
+            M = obj.massMatrix();
+            D = J' * M * J;
+        end
+        
+        %% Coriolis/Centrifugal matrix C (n x n)
+        function C = coriolisCentrifugalMatrix(obj, dt)
+            % Compute C = J^T * M * J_dot + J^T * S * J
+            if nargin < 2
+                dt = obj.dt_prev;
+            end
+            
+            J = obj.jacobianCOM_all();
+            M = obj.massMatrix();
+            S = obj.coriolisMatrix();
+            J_dot = obj.jacobianCOM_dot(dt);
+            
+            C = J' * M * J_dot + J' * S * J;
+        end
+        
+        %% Gravity torque vector G (n x 1)
+        function G = gravityTorque(obj)
+            % Compute G = J^T * g
+            J = obj.jacobianCOM_all();
+            g = obj.gravityVector();
+            G = J' * g;
+        end
+
+        %% Skew-symmetric matrix
+        function S = skew(~, w)
+            % Create skew-symmetric matrix from vector w
+            S = [0    -w(3)  w(2);
+                 w(3)  0    -w(1);
+                -w(2)  w(1)  0   ];
+        end
+        
+        %% Update frame position from linear velocity
+        function d_new = updatePosition(obj, d, v, dt)
+            % Integrate: d_dot = v
+            d_new = d + v * dt;
+        end
+        
+        %% Update frame rotation from angular velocity
+        function R_new = updateRotation(obj, R, omega, dt)
+            % Integrate: R_dot = S(omega) * R
+            S_omega = obj.skew(omega);
+            R_new = expm(S_omega * dt) * R;
+        end
+        
+        %% Update transformation matrix from velocity
+        function T_new = updateTransform(obj, T, v, omega, dt)
+            % Extract current position and rotation
+            d = T(1:3, 4);
+            R = T(1:3, 1:3);
+            
+            % Update position and rotation
+            d_new = obj.updatePosition(d, v, dt);
+            R_new = obj.updateRotation(R, omega, dt);
+            
+            % Construct new transformation matrix
+            T_new = [R_new, d_new; 0 0 0 1];
+        end
+        
+        %% Integrate joint velocities to update joint positions
+        function integrateJointVelocities(obj, dt)
+            % Update q from qdot
+            obj.q = obj.q + obj.qdot * dt;
         end
 
         %% Draw robot
@@ -242,8 +480,11 @@ classdef Manipulator < handle
             % Draw labels
             if obj.visual.showLabels
                 obj.drawLabels(ax);
-            end
-        
+            end            
+            % Draw end-effector
+            if obj.visual.showEndEffector
+                obj.drawEndEffector(ax);
+            end        
             camlight(ax,'headlight');
             material(ax, 'dull');
         end
@@ -321,6 +562,138 @@ classdef Manipulator < handle
             
             legend(ax, 'Location', 'northeastoutside');
         end
+        
+        %% Draw end-effector
+        function drawEndEffector(obj, ax)
+            % Get end-effector frame (last frame)
+            T_ee = obj.fk(obj.n);
+            p = T_ee(1:3,4);
+            x_axis = T_ee(1:3,1);
+            y_axis = T_ee(1:3,2);
+            z_axis = T_ee(1:3,3);
+            
+            size = obj.visual.endEffectorSize;
+            color = obj.visual.endEffectorColor;
+            
+            switch obj.visual.endEffectorType
+                case 'gripper'
+                    % Draw simple parallel gripper
+                    obj.drawGripper(ax, p, x_axis, y_axis, z_axis, size, color);
+                case 'tool'
+                    % Draw simple tool (cone)
+                    obj.drawTool(ax, p, x_axis, y_axis, z_axis, size, color);
+                case 'sphere'
+                    % Draw sphere
+                    obj.drawSphere(ax, p, size, color);
+            end
+        end
+        
+        %% Draw gripper end-effector
+        function drawGripper(obj, ax, p, x_axis, y_axis, z_axis, size, color)
+            % Palm (base plate)
+            palmLength = size * 0.4;
+            palmWidth = size * 0.6;
+            palmThick = size * 0.15;
+            
+            % Create palm as a box
+            [X, Y, Z] = obj.createBox(palmLength, palmWidth, palmThick);
+            
+            % Transform to end-effector frame
+            R = [x_axis, y_axis, z_axis];
+            for i = 1:numel(X)
+                pt = R * [X(i); Y(i); Z(i)] + p;
+                X(i) = pt(1); Y(i) = pt(2); Z(i) = pt(3);
+            end
+            
+            obj.graphics.endEffector.palm = surf(ax, X, Y, Z, ...
+                'FaceColor', color, 'EdgeColor', 'none', ...
+                'FaceLighting', 'gouraud', 'HandleVisibility', 'off');
+            
+            % Fingers (two parallel jaws)
+            fingerLength = size * 0.8;
+            fingerWidth = size * 0.15;
+            fingerThick = size * 0.1;
+            fingerGap = size * 0.3;
+            
+            % Finger 1 (positive y side)
+            [X1, Y1, Z1] = obj.createBox(fingerLength, fingerWidth, fingerThick);
+            offset1 = p + R * [palmLength/2; fingerGap/2 + fingerWidth/2; 0];
+            for i = 1:numel(X1)
+                pt = R * [X1(i); Y1(i); Z1(i)] + offset1;
+                X1(i) = pt(1); Y1(i) = pt(2); Z1(i) = pt(3);
+            end
+            
+            obj.graphics.endEffector.finger1 = surf(ax, X1, Y1, Z1, ...
+                'FaceColor', color * 1.2, 'EdgeColor', 'none', ...
+                'FaceLighting', 'gouraud', 'HandleVisibility', 'off');
+            
+            % Finger 2 (negative y side)
+            [X2, Y2, Z2] = obj.createBox(fingerLength, fingerWidth, fingerThick);
+            offset2 = p + R * [palmLength/2; -fingerGap/2 - fingerWidth/2; 0];
+            for i = 1:numel(X2)
+                pt = R * [X2(i); Y2(i); Z2(i)] + offset2;
+                X2(i) = pt(1); Y2(i) = pt(2); Z2(i) = pt(3);
+            end
+            
+            obj.graphics.endEffector.finger2 = surf(ax, X2, Y2, Z2, ...
+                'FaceColor', color * 1.2, 'EdgeColor', 'none', ...
+                'FaceLighting', 'gouraud', 'HandleVisibility', 'off');
+        end
+        
+        %% Draw tool end-effector
+        function drawTool(obj, ax, p, x_axis, y_axis, z_axis, size, color)
+            % Simple cone tool pointing along x-axis
+            baseRadius = size * 0.3;
+            tipLength = size;
+            
+            [X, Y, Z] = cylinder([baseRadius, 0], 20);
+            Z = Z * tipLength;
+            
+            % Rotate to align with x-axis
+            R = [x_axis, y_axis, z_axis];
+            for i = 1:numel(X)
+                % Original is along z, rotate to x
+                pt = R * [Z(i); X(i); Y(i)] + p;
+                X(i) = pt(1); Y(i) = pt(2); Z(i) = pt(3);
+            end
+            
+            obj.graphics.endEffector.tool = surf(ax, X, Y, Z, ...
+                'FaceColor', color, 'EdgeColor', 'none', ...
+                'FaceLighting', 'gouraud', 'HandleVisibility', 'off');
+        end
+        
+        %% Draw sphere end-effector
+        function drawSphere(obj, ax, p, size, color)
+            [X, Y, Z] = sphere(20);
+            X = X * size * 0.5 + p(1);
+            Y = Y * size * 0.5 + p(2);
+            Z = Z * size * 0.5 + p(3);
+            
+            obj.graphics.endEffector.sphere = surf(ax, X, Y, Z, ...
+                'FaceColor', color, 'EdgeColor', 'none', ...
+                'FaceLighting', 'gouraud', 'HandleVisibility', 'off');
+        end
+        
+        %% Helper: Create box vertices
+        function [X, Y, Z] = createBox(~, length, width, height)
+            % Create a box centered at origin
+            x = [-1 1 1 -1 -1 1 1 -1] * length/2;
+            y = [-1 -1 1 1 -1 -1 1 1] * width/2;
+            z = [-1 -1 -1 -1 1 1 1 1] * height/2;
+            
+            % Define faces
+            faces = [1 2 3 4; 5 6 7 8; 1 2 6 5; 3 4 8 7; 1 4 8 5; 2 3 7 6];
+            
+            X = zeros(4, 6);
+            Y = zeros(4, 6);
+            Z = zeros(4, 6);
+            
+            for i = 1:6
+                X(:,i) = x(faces(i,:));
+                Y(:,i) = y(faces(i,:));
+                Z(:,i) = z(faces(i,:));
+            end
+        end
 
 
         %% Update graphics
@@ -397,8 +770,94 @@ classdef Manipulator < handle
             if obj.visual.showLabels && isfield(obj.graphics,'labels') && ~isempty(obj.graphics.labels)
                 obj.updateLabels();
             end
+            
+            % Update end-effector
+            if obj.visual.showEndEffector && isfield(obj.graphics,'endEffector')
+                obj.updateEndEffector();
+            end
         
             drawnow;
+        end
+        
+        %% Update end-effector position
+        function updateEndEffector(obj)
+            if ~isfield(obj.graphics, 'endEffector') || isempty(obj.graphics.endEffector)
+                return;
+            end
+            
+            % Get current end-effector frame
+            T_ee = obj.fk(obj.n);
+            p = T_ee(1:3,4);
+            x_axis = T_ee(1:3,1);
+            y_axis = T_ee(1:3,2);
+            z_axis = T_ee(1:3,3);
+            R = [x_axis, y_axis, z_axis];
+            
+            size = obj.visual.endEffectorSize;
+            
+            switch obj.visual.endEffectorType
+                case 'gripper'
+                    % Update palm
+                    if isfield(obj.graphics.endEffector, 'palm') && isgraphics(obj.graphics.endEffector.palm)
+                        palmLength = size * 0.4;
+                        palmWidth = size * 0.6;
+                        palmThick = size * 0.15;
+                        [X, Y, Z] = obj.createBox(palmLength, palmWidth, palmThick);
+                        for i = 1:numel(X)
+                            pt = R * [X(i); Y(i); Z(i)] + p;
+                            X(i) = pt(1); Y(i) = pt(2); Z(i) = pt(3);
+                        end
+                        set(obj.graphics.endEffector.palm, 'XData', X, 'YData', Y, 'ZData', Z);
+                    end
+                    
+                    % Update fingers
+                    fingerLength = size * 0.8;
+                    fingerWidth = size * 0.15;
+                    fingerThick = size * 0.1;
+                    fingerGap = size * 0.3;
+                    
+                    if isfield(obj.graphics.endEffector, 'finger1') && isgraphics(obj.graphics.endEffector.finger1)
+                        [X1, Y1, Z1] = obj.createBox(fingerLength, fingerWidth, fingerThick);
+                        offset1 = p + R * [palmLength/2; fingerGap/2 + fingerWidth/2; 0];
+                        for i = 1:numel(X1)
+                            pt = R * [X1(i); Y1(i); Z1(i)] + offset1;
+                            X1(i) = pt(1); Y1(i) = pt(2); Z1(i) = pt(3);
+                        end
+                        set(obj.graphics.endEffector.finger1, 'XData', X1, 'YData', Y1, 'ZData', Z1);
+                    end
+                    
+                    if isfield(obj.graphics.endEffector, 'finger2') && isgraphics(obj.graphics.endEffector.finger2)
+                        [X2, Y2, Z2] = obj.createBox(fingerLength, fingerWidth, fingerThick);
+                        offset2 = p + R * [palmLength/2; -fingerGap/2 - fingerWidth/2; 0];
+                        for i = 1:numel(X2)
+                            pt = R * [X2(i); Y2(i); Z2(i)] + offset2;
+                            X2(i) = pt(1); Y2(i) = pt(2); Z2(i) = pt(3);
+                        end
+                        set(obj.graphics.endEffector.finger2, 'XData', X2, 'YData', Y2, 'ZData', Z2);
+                    end
+                    
+                case 'tool'
+                    if isfield(obj.graphics.endEffector, 'tool') && isgraphics(obj.graphics.endEffector.tool)
+                        baseRadius = size * 0.3;
+                        tipLength = size;
+                        [X, Y, Z] = cylinder([baseRadius, 0], 20);
+                        Z = Z * tipLength;
+                        for i = 1:numel(X)
+                            pt = R * [Z(i); X(i); Y(i)] + p;
+                            X(i) = pt(1); Y(i) = pt(2); Z(i) = pt(3);
+                        end
+                        set(obj.graphics.endEffector.tool, 'XData', X, 'YData', Y, 'ZData', Z);
+                    end
+                    
+                case 'sphere'
+                    if isfield(obj.graphics.endEffector, 'sphere') && isgraphics(obj.graphics.endEffector.sphere)
+                        [X, Y, Z] = sphere(20);
+                        X = X * size * 0.5 + p(1);
+                        Y = Y * size * 0.5 + p(2);
+                        Z = Z * size * 0.5 + p(3);
+                        set(obj.graphics.endEffector.sphere, 'XData', X, 'YData', Y, 'ZData', Z);
+                    end
+            end
         end
         
         %% Update frame graphics

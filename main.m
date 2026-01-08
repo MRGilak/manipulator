@@ -10,58 +10,27 @@ function main
 
     jointType = ['R','R','R','R','R','R'];
 
-    robot = Manipulator(a,d,alpha,jointType);
+    %% Create robot
+    robot = Manipulator(a, d, alpha, jointType);
     
     % Configure link visualization
     robot.visual.linkLengths = [l1, l2, l3, l4, l5, l6];
-    
-    % Link type: 'z' = extends along z-axis of frame (i-1)
-    %            'xy' = extends in x-y plane of frame (i-1), rotates with q(i)
     robot.visual.linkType = {'z', 'xy', 'xy', 'z', 'xy', 'z'};
-    
-    % Link offset: where each link starts along the z-axis of frame (i-1)
     robot.visual.linkOffset = [0, 0, 0, l3, 0, l5];
-    
-    % Theta offset: additional rotation for 'xy' type links (in radians)
-    % Example: pi/2 for 90 degrees rotation even when q(i) = 0
-    robot.visual.linkThetaOffset = [0, 0, pi/2, 0, -pi/2, 0];  % Link 3 rotated 90° from x-axis
+    robot.visual.linkThetaOffset = [0, 0, pi/2, 0, -pi/2, 0];
 
-    %% Figure
-    fig = figure('Name','Manipulator','NumberTitle','off','Position',[10 10 1000 800]);
-    ax = axes('Parent',fig,'Position',[0.05 0.05 0.65 0.9]);
-    grid(ax,'on');
-    
-    xlabel(ax,'X');
-    ylabel(ax,'Y');
-    zlabel(ax,'Z');
-    
-    view(ax,3);
-    camproj(ax,'perspective');
-    rotate3d(ax,'on');
+    robot.comOffset = [0, (l2)/2, 0, 0, 0, 0; ...
+                        (l1)/2, 0, 0, (l4)/2, 0, 0; ...
+                        0, 0, -(l3)/2, 0, -(l5)/2, (l6)/2];  % 3x6 matrix with COM vectors
 
-    robot.draw(ax);
-    
-    % Set view after drawing so axis auto-fits the robot
-    axis(ax,'vis3d');
-    axis(ax,'equal');
+    % End-effector options
+    robot.visual.showEndEffector = true;              % Show/hide
+    robot.visual.endEffectorType = 'gripper';         % 'gripper', 'tool', or 'sphere'
+    robot.visual.endEffectorSize = 80;                % Size in mm
+    robot.visual.endEffectorColor = [0.3 0.3 0.3];    % RGB color (dark gray)    
 
-    %% Sliders
-    for i = 1:6
-        uicontrol('Style','text',...
-            'String',sprintf('Joint %d',i),...
-            'Units','normalized',...
-            'Position',[0.78 0.90-0.12*i 0.08 0.03],...
-            'HorizontalAlignment','left');
-        uicontrol('Style','slider',...
-            'Min',-pi,'Max',pi,'Value',0,...
-            'Units','normalized',...
-            'Position',[0.78 0.87-0.12*i 0.18 0.04],...
-            'Callback',@(src,~) sliderCB(i,src.Value));
-    end
-
-    %% Nested callback 
-    function sliderCB(idx,val)
-        robot.q(idx) = val;
-        robot.updateGraphics();
-    end
+    %% Create and run simulation
+    sim = Simulation(robot);
+    sim.mode = 'manual'; 
+    sim.run();
 end

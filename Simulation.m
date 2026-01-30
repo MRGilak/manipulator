@@ -8,6 +8,7 @@ classdef Simulation < handle
         controls        % Structure to store UI control handles
         time            % Current simulation time
         dt              % Time step for dynamic simulation
+        plotConfig      % Configuration for plotting
     end
     
     methods
@@ -18,6 +19,8 @@ classdef Simulation < handle
             obj.time = 0;
             obj.dt = 0.01;  % 10ms default time step
             obj.controls = struct();
+            
+            obj.plotConfig = struct('q', true, 'qdot', false, 'qddot', false, 'u', false);
             
             % Add any robots passed to constructor
             for i = 1:nargin
@@ -533,9 +536,6 @@ classdef Simulation < handle
             controller = obj.controllers{1};
             u = controller.uNext();
 
-            % G = zeros(6, 1);
-            % u = 1e7 * [0; 0; 0; 0; sin(2*pi*2*obj.time); 0];
-
             % Solve for acceleration
             q_ddot = D \ (-C * robot.qdot - G + u);
              
@@ -544,6 +544,14 @@ classdef Simulation < handle
             
             % Integrate position
             robot.q = robot.q + robot.qdot * obj.dt;
+
+            % Optional debug checks
+            if isfield(obj.plotConfig, 'debugInertia') && obj.plotConfig.debugInertia
+                robot.checkInertiaMatrixPD();
+            end
+            if isfield(obj.plotConfig, 'debugSkewSymmetry') && obj.plotConfig.debugSkewSymmetry
+                robot.checkSkewSymmetry(obj.dt);
+            end
 
             % Save results
             robot.q_his(:, end+1) = robot.q;
@@ -611,68 +619,33 @@ classdef Simulation < handle
             tf = length(robot.q_his)*obj.dt;
             t = obj.dt:obj.dt:tf;
 
-            % Angles
-            figure("Name", "Joint Angles", 'Position', [10, 10, 1000, 800]);
-            subplot(2, 3, 1);
-            plot(t, robot.q_his(1, :), 'b', 'LineWidth', 1.5);
-            grid on;
-            title('$q_1 (t)$', 'Interpreter', 'latex', 'FontName', ...
-                'Times New Roman', 'FontSize', 9);
-            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
-                'FontSize', 9);
-            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
-                'FontName', 'Times New Roman', 'FontSize', 9);
-
-            subplot(2, 3, 2);
-            plot(t, robot.q_his(2, :), 'b', 'LineWidth', 1.5);
-            grid on;
-            title('$q_2 (t)$', 'Interpreter', 'latex', 'FontName', ...
-                'Times New Roman', 'FontSize', 9);
-            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
-                'FontSize', 9);
-            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
-                'FontName', 'Times New Roman', 'FontSize', 9);
-
-            subplot(2, 3, 3);
-            plot(t, robot.q_his(3, :), 'b', 'LineWidth', 1.5);
-            grid on;
-            title('$q_3 (t)$', 'Interpreter', 'latex', 'FontName', ...
-                'Times New Roman', 'FontSize', 9);
-            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
-                'FontSize', 9);
-            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
-                'FontName', 'Times New Roman', 'FontSize', 9);
-
-            subplot(2, 3, 4);
-            plot(t, robot.q_his(4, :), 'b', 'LineWidth', 1.5);
-            grid on;
-            title('$q_4 (t)$', 'Interpreter', 'latex', 'FontName', ...
-                'Times New Roman', 'FontSize', 9);
-            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
-                'FontSize', 9);
-            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
-                'FontName', 'Times New Roman', 'FontSize', 9);
-
-            subplot(2, 3, 5);
-            plot(t, robot.q_his(5, :), 'b', 'LineWidth', 1.5);
-            grid on;
-            title('$q_5 (t)$', 'Interpreter', 'latex', 'FontName', ...
-                'Times New Roman', 'FontSize', 9);
-            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
-                'FontSize', 9);
-            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
-                'FontName', 'Times New Roman', 'FontSize', 9);
-
-            subplot(2, 3, 6);
-            plot(t, robot.q_his(6, :), 'b', 'LineWidth', 1.5);
-            grid on;
-            title('$q_6 (t)$', 'Interpreter', 'latex', 'FontName', ...
-                'Times New Roman', 'FontSize', 9);
-            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
-                'FontSize', 9);
-            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
-                'FontName', 'Times New Roman', 'FontSize', 9);
-            
+            if obj.plotConfig.q
+                obj.plotVariable(t, robot.q_his, 'q', 'Angle ($^\\circ$)');
+            end
+            if obj.plotConfig.qdot
+                obj.plotVariable(t, robot.qdot_his, '\\dot{q}', 'Velocity (rad/s)');
+            end
+            if obj.plotConfig.qddot
+                obj.plotVariable(t, robot.qddot_his, '\\ddot{q}', 'Acceleration (rad/s$^2$)');
+            end
+            if obj.plotConfig.u
+                obj.plotVariable(t, robot.u_his, 'u', 'Torque (N$\\cdot$mm)');
+            end
+        end
+        
+        function plotVariable(obj, t, data, varName, yLabel)
+            n = size(data, 1);
+            figure('Name', sprintf('Joint %s', varName), 'Position', [10, 10, 1000, 800]);
+            for i = 1:n
+                subplot(2, 3, i);
+                plot(t, data(i, :), 'b', 'LineWidth', 1.5);
+                grid on;
+                title(sprintf('$%s_%d (t)$', varName, i), 'Interpreter', 'latex', ...
+                    'FontName', 'Times New Roman', 'FontSize', 9);
+                xlabel('Time (s)', 'FontName', 'Times New Roman', 'FontSize', 9);
+                ylabel(yLabel, 'interpreter', 'latex', ...
+                    'FontName', 'Times New Roman', 'FontSize', 9);
+            end
         end
     end
 end

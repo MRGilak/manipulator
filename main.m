@@ -34,14 +34,13 @@ function main
 
     %% Create and run simulation
     sim = Simulation(robot);
-    sim.mode = 'manual';
+    sim.mode = 'dynamic';
+    
+    sim.plotConfig.q = true;
+    sim.plotConfig.qdot = true;
+    % sim.plotConfig.debugInertia = true;
+    % sim.plotConfig.debugSkewSymmetry = true;
 
-    % controller = Controller(robot, 'Open-Loop', 0.01);
-
-    % controller = Controller(robot, 'Gravity Compensation', 0.01);
-
-    % Lambda = diag([100, 100, 100, 100, 10, 100]);
-    % K = diag([100, 100, 100, 10, 10, 10]);
     qdes = [0; 0; 0; pi/2; 0; -pi/2];
     qdotdes = zeros(6, 1);
     qddotdes = zeros(6, 1);
@@ -52,10 +51,6 @@ function main
     % PD controller
     controller = Controller(robot, 'PD With Gravity Compensation', ...
         0.01, Kp, Kd, qdes);
-
-    % % Slotine controller
-    % controller = Controller(robot, 'Slotine', ...
-    %     0.01, Lambda, K, qdes, qdotdes, qddotdes);
 
     sim.addController(controller);
 

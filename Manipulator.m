@@ -113,7 +113,6 @@ classdef Manipulator < handle
             
             % Jacobian derivative computation
             obj.J_prev = [];
-            obj.dt_prev = 0.01;  % Default time step
 
             obj.graphics = struct();
         end
@@ -305,22 +304,6 @@ classdef Manipulator < handle
                 M(idx_rot, idx_rot) = obj.inertia(:,:,i);
             end
         end
-
-        %% Estimate inertias from COM if not provided
-        function estimateInertias(obj)
-            % For links with zero inertia, estimate inertia using point-mass
-            % approximation about the frame origin:
-            % I = m * (||r||^2 * I3 - r * r^T)
-            for i = 1:obj.n
-                I_i = obj.inertia(:,:,i);
-                if all(I_i(:) == 0)
-                    r = obj.comOffset(:, i);
-                    m = obj.mass(i);
-                    I_est = m * (norm(r)^2 * eye(3) - (r * r'));
-                    obj.inertia(:,:,i) = I_est;
-                end
-            end
-        end
         
         %% Coriolis matrix S (6n x 6n)
         function S = coriolisMatrix(obj)
@@ -383,10 +366,6 @@ classdef Manipulator < handle
         %% Time derivative of stacked COM Jacobian (6n x n)
         function J_dot = jacobianCOM_dot(obj, dt)
             % Compute numerical derivative of COM Jacobian
-            % Uses finite difference
-            if nargin < 2
-                dt = obj.dt_prev;
-            end
             
             J_current = obj.jacobianCOM_all();
             
@@ -409,6 +388,17 @@ classdef Manipulator < handle
             J = obj.jacobianCOM_all();
             M = obj.massMatrix();
             D = J' * M * J;
+        end
+
+        %% Inertia matrix Derivative (n x n)
+        function D_dot = inertiaMatrixDot(obj, dt)
+            % Compute time derivative of inertia matrix D
+            
+            J = obj.jacobianCOM_all();
+            M = obj.massMatrix();
+            J_dot = obj.jacobianCOM_dot(dt);
+
+            D_dot = J_dot' * M * J + J' * M * J_dot;
         end
         
         %% Coriolis/Centrifugal matrix C (n x n)
@@ -473,6 +463,52 @@ classdef Manipulator < handle
         function integrateJointVelocities(obj, dt)
             % Update q from qdot
             obj.q = obj.q + obj.qdot * dt;
+        end
+        
+        %% Debug: Check if D is positive definite
+        function [isPD, eigVals] = checkInertiaMatrixPD(obj)
+            D = obj.inertiaMatrix();
+            eigVals = eig(D);
+            isPD = all(eigVals > 0);
+            if isPD
+                fprintf('D is positive definite. Eigenvalues: %s\n', mat2str(eigVals, 4));
+            else
+                fprintf('D is NOT positive definite. Eigenvalues: %s\n', mat2str(eigVals, 4));
+            end
+        end
+        
+        %% Debug: Check if Ddot - 2C is skew-symmetric
+        function [isSkew, err] = checkSkewSymmetry(obj, dt)
+            J = obj.jacobianCOM_all();
+            M = obj.massMatrix();
+            S_mat = obj.coriolisMatrix();
+            J_dot = obj.jacobianCOM_dot(dt);
+            
+            D_dot = obj.inertiaMatrixDot(dt);
+            C = obj.coriolisCentrifugalMatrix(dt);
+            
+            % Check individual components
+            term1 = J_dot' * M * J - J' * M * J_dot;
+            term2 = -2 * J' * S_mat * J;
+            
+            err_M = norm(M - M', 'fro');
+            err_S = norm(S_mat + S_mat', 'fro');
+            err_term1 = norm(term1 + term1', 'fro');
+            err_term2 = norm(term2 + term2', 'fro');
+            
+            S = D_dot - 2*C;
+            err = norm(S + S', 'fro');
+            isSkew = err < 1e-6;
+            
+            fprintf('M symmetry error: %.2e\n', err_M);
+            fprintf('S skew-symmetry error: %.2e\n', err_S);
+            fprintf('Term1 (J_dot''*M*J - J''*M*J_dot) skew error: %.2e\n', err_term1);
+            fprintf('Term2 (-2*J''*S*J) skew error: %.2e\n', err_term2);
+            if isSkew
+                fprintf('Ddot - 2C is skew-symmetric. Norm: %.2e\n', err);
+            else
+                fprintf('Ddot - 2C is NOT skew-symmetric. Norm: %.2e\n', err);
+            end
         end
 
         %% Draw robot

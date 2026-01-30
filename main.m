@@ -12,12 +12,15 @@ function main
 
     %% Create robot
     robot = Manipulator(a, d, alpha, jointType);
-    
+    robot.setJointAngles([0; pi/2; -pi/2; 0; 0; 0]);
     % Configure link visualization
     robot.visual.linkLengths = [l1, l2, l3, l4, l5, l6];
     robot.visual.linkType = {'z', 'xy', 'xy', 'z', 'xy', 'z'};
     robot.visual.linkOffset = [0, 0, 0, l3, 0, l5];
     robot.visual.linkThetaOffset = [0, 0, pi/2, 0, -pi/2, 0];
+
+    mass = 0.10*[10, 10, 10, 1, 1, 1];
+    robot.setMassAndInertia(mass);
 
     robot.comOffset = [0, (l2)/2, 0, 0, 0, 0; ...
                         (l1)/2, 0, 0, (l4)/2, 0, 0; ...
@@ -27,10 +30,34 @@ function main
     robot.visual.showEndEffector = true;              % Show/hide
     robot.visual.endEffectorType = 'gripper';         % 'gripper', 'tool', or 'sphere'
     robot.visual.endEffectorSize = 80;                % Size in mm
-    robot.visual.endEffectorColor = [0.3 0.3 0.3];    % RGB color (dark gray)    
+    robot.visual.endEffectorColor = [0.3 0.3 0.3];    % RGB color (dark gray)  
 
     %% Create and run simulation
     sim = Simulation(robot);
-    sim.mode = 'manual'; 
+    sim.mode = 'manual';
+
+    % controller = Controller(robot, 'Open-Loop', 0.01);
+
+    % controller = Controller(robot, 'Gravity Compensation', 0.01);
+
+    % Lambda = diag([100, 100, 100, 100, 10, 100]);
+    % K = diag([100, 100, 100, 10, 10, 10]);
+    qdes = [0; 0; 0; pi/2; 0; -pi/2];
+    qdotdes = zeros(6, 1);
+    qddotdes = zeros(6, 1);
+
+    Kp = diag([100, 100, 100, 100, 10, 100]);
+    Kd = diag([100, 100, 100, 10, 10, 10]);
+
+    % PD controller
+    controller = Controller(robot, 'PD With Gravity Compensation', ...
+        0.01, Kp, Kd, qdes);
+
+    % % Slotine controller
+    % controller = Controller(robot, 'Slotine', ...
+    %     0.01, Lambda, K, qdes, qdotdes, qddotdes);
+
+    sim.addController(controller);
+
     sim.run();
 end

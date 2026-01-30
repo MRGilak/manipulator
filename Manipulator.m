@@ -11,6 +11,12 @@ classdef Manipulator < handle
         q
         qdot
 
+        % State history
+        q_his
+        qdot_his
+        qddot_his
+        u_his
+
         % Base pose
         baseT
 
@@ -41,6 +47,11 @@ classdef Manipulator < handle
             obj.q = zeros(obj.n,1);
             obj.qdot = zeros(obj.n,1);
 
+            obj.q_his = zeros(obj.n,1);
+            obj.qdot_his = zeros(obj.n,1);
+            obj.qddot_his = zeros(obj.n,1);
+            obj.u_his = zeros(obj.n,1);
+
             % Base pose
             if nargin > 4
                 obj.baseT = varargin{1};
@@ -50,17 +61,16 @@ classdef Manipulator < handle
 
             % Visual defaults
             obj.visual = struct();
-            obj.visual.linkRadius     = 20;
+            obj.visual.linkRadius     = [50, 50, 50, 10, 10, 10];
             obj.visual.linkResolution = 20;
             
-            % Link lengths (physical length of each link)
+            % Link lengths
             obj.visual.linkLengths = sqrt(obj.a.^2 + obj.d.^2);  % Default estimate
             
             % Link offset: distance from frame (i-1) origin where link starts
             obj.visual.linkOffset = zeros(1, obj.n);
             
-            % Theta offset: additional rotation in x-y plane (for 'xy' type links)
-            % Final angle = q(i) + linkThetaOffset(i)
+            % Theta offset : final angle = q(i) + linkThetaOffset(i)
             obj.visual.linkThetaOffset = zeros(1, obj.n);
             
             % Link type: 'z' = extends along z-axis of frame (i-1)
@@ -98,10 +108,12 @@ classdef Manipulator < handle
                 obj.inertia(:,:,i) = eye(3);  % Unit inertia
             end
             obj.g0 = 9810;  % mm/s^2
+
+            obj.calculateInertia();
             
             % Jacobian derivative computation
             obj.J_prev = [];
-            obj.dt_prev = 0.05;  % Default time step
+            obj.dt_prev = 0.01;  % Default time step
 
             obj.graphics = struct();
         end
@@ -109,6 +121,51 @@ classdef Manipulator < handle
         %% Set joint angles
         function setJointAngles(obj,q)
             obj.q = q(:);
+        end
+
+        function setMassAndInertia(obj, mass, varargin)
+            Mass = mass(:);
+            obj.mass = Mass';
+            
+            if nargin > 2
+                Inertia = varargin{1}(:);
+                obj.inertia = Inertia';
+            end
+        end
+
+        function obj = calculateInertia(obj)
+            for i = 1:obj.n
+                obj.inertia(:,:,i) = [((1/12)*obj.mass(i)*(obj.visual.linkLengths(i))^2) + ...
+                                        ((1/4)*obj.mass(i)*(obj.visual.linkRadius(i))^2), 0, 0; ...
+                                        0, ((1/12)*obj.mass(i)*(obj.visual.linkLengths(i))^2) + ...
+                                        ((1/4)*obj.mass(i)*(obj.visual.linkRadius(i))^2), 0;
+                                        0, 0, ((1/12)*obj.mass(i)*(obj.visual.linkLengths(i))^2)];
+            end
+        end
+
+        % Denavit-Hartenberg
+        function H = dh(obj, theta, d, a, alpha)
+            M_theta = [ cos(theta) -sin(theta)  0  0;
+                        sin(theta)  cos(theta)  0  0;
+                        0           0           1  0;
+                        0           0           0  1 ];
+        
+            M_d = [ 1 0 0 0;
+                    0 1 0 0;
+                    0 0 1 d;
+                    0 0 0 1 ];
+        
+            M_a = [ 1 0 0 a;
+                    0 1 0 0;
+                    0 0 1 0;
+                    0 0 0 1 ];
+        
+            M_alpha = [ 1 0           0            0;
+                        0 cos(alpha) -sin(alpha)   0;
+                        0 sin(alpha)  cos(alpha)   0;
+                        0 0           0            1 ];
+        
+            H = M_theta * M_d * M_a * M_alpha;
         end
 
         %% DH transform for joint i
@@ -124,7 +181,7 @@ classdef Manipulator < handle
             a_i = obj.a(i);
             alpha_i = obj.alpha(i);
 
-            Ti = dh(theta,d_i,a_i,alpha_i);
+            Ti = obj.dh(theta,d_i,a_i,alpha_i);
         end
 
         %% Forward kinematics to frame idx
@@ -137,6 +194,11 @@ classdef Manipulator < handle
 
         %% Angular Jacobian
         function Jw = jacobianOmega(obj,frameIdx)
+            % frameIdx: index of the frame (default is end-effector)
+            if nargin < 2
+                frameIdx = obj.n;
+            end
+            
             k = [0;0;1];
             Jw = zeros(3,obj.n);
 
@@ -157,6 +219,11 @@ classdef Manipulator < handle
 
         %% Linear Jacobian
         function Jv = jacobianLinear(obj,frameIdx)
+            % frameIdx: index of the frame (default is end-effector)
+            if nargin < 2
+                frameIdx = obj.n;
+            end
+
             k = [0;0;1];
             Jv = zeros(3,obj.n);
 
@@ -236,6 +303,22 @@ classdef Manipulator < handle
                 % Bottom-right quarter: inertia matrix
                 idx_rot = 3*obj.n + (i-1)*3 + (1:3);
                 M(idx_rot, idx_rot) = obj.inertia(:,:,i);
+            end
+        end
+
+        %% Estimate inertias from COM if not provided
+        function estimateInertias(obj)
+            % For links with zero inertia, estimate inertia using point-mass
+            % approximation about the frame origin:
+            % I = m * (||r||^2 * I3 - r * r^T)
+            for i = 1:obj.n
+                I_i = obj.inertia(:,:,i);
+                if all(I_i(:) == 0)
+                    r = obj.comOffset(:, i);
+                    m = obj.mass(i);
+                    I_est = m * (norm(r)^2 * eye(3) - (r * r'));
+                    obj.inertia(:,:,i) = I_est;
+                end
             end
         end
         
@@ -395,7 +478,7 @@ classdef Manipulator < handle
         %% Draw robot
         function draw(obj, ax)
             hold(ax,'on');
-            axis(ax,'equal');
+            % axis(ax,'equal');
             axis(ax,'vis3d');
             grid(ax,'on');
             view(ax,3);
@@ -403,6 +486,10 @@ classdef Manipulator < handle
             xlabel(ax,'X');
             ylabel(ax,'Y');
             zlabel(ax,'Z');
+
+            xlim(ax,[-750 750]);
+            ylim(ax,[-750 750]);
+            zlim(ax,[0 1600]);
         
             obj.graphics.links = struct([]);
             obj.graphics.frames = struct([]);
@@ -451,7 +538,7 @@ classdef Manipulator < handle
                 end
         
                 % Create cylinder along Z
-                [X,Y,Z] = cylinder(obj.visual.linkRadius, obj.visual.linkResolution);
+                [X,Y,Z] = cylinder(obj.visual.linkRadius(i), obj.visual.linkResolution);
                 Z = Z * L;
         
                 % Rotation: Z-axis to link direction
@@ -695,7 +782,6 @@ classdef Manipulator < handle
             end
         end
 
-
         %% Update graphics
         function updateGraphics(obj)
             if ~isfield(obj.graphics,'links') || isempty(obj.graphics.links)
@@ -746,7 +832,7 @@ classdef Manipulator < handle
                     continue;
                 end
         
-                [X,Y,Z] = cylinder(obj.visual.linkRadius, obj.visual.linkResolution);
+                [X,Y,Z] = cylinder(obj.visual.linkRadius(i), obj.visual.linkResolution);
                 Z = Z * L;
         
                 z0 = [0;0;1];

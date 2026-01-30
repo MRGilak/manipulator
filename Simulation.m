@@ -1,6 +1,7 @@
 classdef Simulation < handle
     properties
         robots          % Cell array of robot objects
+        controllers     % Cell array of controller objects
         fig             % Figure handle
         ax              % Axes handle
         mode            % Simulation mode
@@ -27,6 +28,11 @@ classdef Simulation < handle
         function addRobot(obj, robot)
             % Add a robot to the simulation
             obj.robots{end+1} = robot;
+        end
+
+        function addController(obj, controller)
+            % Add a robot to the simulation
+            obj.controllers{end+1} = controller;
         end
         
         function removeRobot(obj, idx)
@@ -59,19 +65,6 @@ classdef Simulation < handle
             zlabel(obj.ax,'Z (mm)');
             view(obj.ax,3);
             rotate3d(obj.ax,'on');
-            
-            % Set fixed axis limits to prevent dynamic resizing
-            xlim(obj.ax,[-1000 1000]);
-            ylim(obj.ax,[-1000 1000]);
-            zlim(obj.ax,[0 2000]);
-            
-            % Lock all axis properties to prevent any changes
-            set(obj.ax, 'XLimMode', 'manual');
-            set(obj.ax, 'YLimMode', 'manual');
-            set(obj.ax, 'ZLimMode', 'manual');
-            set(obj.ax, 'DataAspectRatioMode', 'manual');
-            set(obj.ax, 'PlotBoxAspectRatioMode', 'manual');
-            set(obj.ax, 'CameraViewAngleMode', 'manual');
             
             hold(obj.ax,'on');
         end
@@ -235,7 +228,7 @@ classdef Simulation < handle
             % Create timer for continuous integration
             obj.controls.velocityTimer = timer(...
                 'ExecutionMode','fixedRate',...
-                'Period',0.05,...  % 50ms = 20Hz update rate
+                'Period',0.01,...  
                 'TimerFcn',@(~,~) obj.velocityTimerCallback());
             
             % Start the timer
@@ -243,6 +236,20 @@ classdef Simulation < handle
         end
         
         function createTrajectoryControls(obj)
+            % Mode selector
+            uicontrol('Style','text',...
+                'String','Mode:',...
+                'Units','normalized',...
+                'Position',[0.75 0.95 0.08 0.03],...
+                'HorizontalAlignment','left');
+            
+            obj.controls.modeMenu = uicontrol('Style','popupmenu',...
+                'String',{'Manual','Velocity','Trajectory','Dynamic'},...
+                'Value',3,...  % Trajectory mode selected
+                'Units','normalized',...
+                'Position',[0.83 0.95 0.15 0.03],...
+                'Callback',@(src,~) obj.changeMode(src.Value));
+
             % Placeholder for trajectory mode controls
             uicontrol('Style','text',...
                 'String','Trajectory Mode (Coming Soon)',...
@@ -256,9 +263,7 @@ classdef Simulation < handle
             if isempty(obj.robots)
                 return;
             end
-            
-            robot = obj.robots{1};
-            
+                        
             % Mode selector
             uicontrol('Style','text',...
                 'String','Mode:',...
@@ -304,6 +309,29 @@ classdef Simulation < handle
                 'HorizontalAlignment','center',...
                 'FontWeight','bold',...
                 'ForegroundColor',[0 0.5 0]);
+
+            % Controller selector
+            uicontrol('Style','text',...
+                'String','Controller:',...
+                'Units','normalized',...
+                'Position',[0.75 0.35 0.08 0.03],...
+                'HorizontalAlignment','left');
+            
+            obj.controls.controlMenu = uicontrol('Style','popupmenu',...
+                'String',{'Open Loop','Gravity Compensation','PD', ...
+                'PD With Gravity Compensation', 'Slotine'},...
+                'Value',1,...
+                'Units','normalized',...
+                'Position',[0.83 0.35 0.15 0.03],...
+                'Callback',@(src,~) obj.changeController(src.Value));
+
+            % Plot Results
+            obj.controls.plotResultsBtn = uicontrol('Style','pushbutton',...
+                'String','Plot Results',...
+                'Units','normalized',...
+                'Position',[0.75 0.25 0.23 0.06],...
+                'FontSize',11,...
+                'Callback',@(~,~) obj.plotResults());
         end
         
         function draw(obj)
@@ -354,14 +382,12 @@ classdef Simulation < handle
             if isempty(obj.robots)
                 return;
             end
-            
-            dt = 0.05;  % 50ms time step (matches timer period)
-            
+                        
             for i = 1:length(obj.robots)
                 robot = obj.robots{i};
                 
                 % Integrate joint velocities
-                robot.integrateJointVelocities(dt);
+                robot.integrateJointVelocities(obj.dt);
                 
                 % Update graphics
                 robot.updateGraphics();
@@ -393,6 +419,12 @@ classdef Simulation < handle
             
             % Create new controls for selected mode
             obj.createUI();
+        end
+
+        function changeController(obj, controllerIdx)
+            % Change simulation mode
+            types = {'Open-Loop', 'Gravity Compensation', 'PD', 'PD With Gravity Compensation', 'Slotine'};
+            obj.controllers{1}.type = types{controllerIdx};
         end
         
         function clearControls(obj)
@@ -487,7 +519,6 @@ classdef Simulation < handle
         
         function dynamicsTimerCallback(obj)
             % Dynamic simulation integration: D*q_ddot + C*q_dot + G = u
-            % With u = 0 (open-loop, gravity only)
             if isempty(obj.robots)
                 return;
             end
@@ -499,14 +530,26 @@ classdef Simulation < handle
             C = robot.coriolisCentrifugalMatrix(obj.dt);
             G = robot.gravityTorque();
             
-            % Solve for acceleration: q_ddot = D^(-1) * (-C*q_dot - G)
-            q_ddot = D \ (-C * robot.qdot - G);
-            
+            controller = obj.controllers{1};
+            u = controller.uNext();
+
+            % G = zeros(6, 1);
+            % u = 1e7 * [0; 0; 0; 0; sin(2*pi*2*obj.time); 0];
+
+            % Solve for acceleration
+            q_ddot = D \ (-C * robot.qdot - G + u);
+             
             % Integrate velocity
             robot.qdot = robot.qdot + q_ddot * obj.dt;
             
             % Integrate position
             robot.q = robot.q + robot.qdot * obj.dt;
+
+            % Save results
+            robot.q_his(:, end+1) = robot.q;
+            robot.qdot_his(:, end+1) = robot.qdot;
+            robot.qddot_his(:, end+1) = q_ddot;
+            robot.u_his(:, end+1) = u;
             
             % Update visualization
             robot.updateGraphics();
@@ -516,7 +559,7 @@ classdef Simulation < handle
             set(obj.controls.timeText, 'String', sprintf('Time: %.2f s', obj.time));
             drawnow limitrate;
         end
-        
+
         function resetDynamics(obj)
             % Reset to home position and zero velocities
             if isempty(obj.robots)
@@ -561,6 +604,75 @@ classdef Simulation < handle
             if ishandle(obj.fig)
                 delete(obj.fig);
             end
+        end
+
+        function plotResults(obj)
+            robot = obj.robots{1};
+            tf = length(robot.q_his)*obj.dt;
+            t = obj.dt:obj.dt:tf;
+
+            % Angles
+            figure("Name", "Joint Angles", 'Position', [10, 10, 1000, 800]);
+            subplot(2, 3, 1);
+            plot(t, robot.q_his(1, :), 'b', 'LineWidth', 1.5);
+            grid on;
+            title('$q_1 (t)$', 'Interpreter', 'latex', 'FontName', ...
+                'Times New Roman', 'FontSize', 9);
+            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
+                'FontSize', 9);
+            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
+                'FontName', 'Times New Roman', 'FontSize', 9);
+
+            subplot(2, 3, 2);
+            plot(t, robot.q_his(2, :), 'b', 'LineWidth', 1.5);
+            grid on;
+            title('$q_2 (t)$', 'Interpreter', 'latex', 'FontName', ...
+                'Times New Roman', 'FontSize', 9);
+            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
+                'FontSize', 9);
+            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
+                'FontName', 'Times New Roman', 'FontSize', 9);
+
+            subplot(2, 3, 3);
+            plot(t, robot.q_his(3, :), 'b', 'LineWidth', 1.5);
+            grid on;
+            title('$q_3 (t)$', 'Interpreter', 'latex', 'FontName', ...
+                'Times New Roman', 'FontSize', 9);
+            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
+                'FontSize', 9);
+            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
+                'FontName', 'Times New Roman', 'FontSize', 9);
+
+            subplot(2, 3, 4);
+            plot(t, robot.q_his(4, :), 'b', 'LineWidth', 1.5);
+            grid on;
+            title('$q_4 (t)$', 'Interpreter', 'latex', 'FontName', ...
+                'Times New Roman', 'FontSize', 9);
+            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
+                'FontSize', 9);
+            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
+                'FontName', 'Times New Roman', 'FontSize', 9);
+
+            subplot(2, 3, 5);
+            plot(t, robot.q_his(5, :), 'b', 'LineWidth', 1.5);
+            grid on;
+            title('$q_5 (t)$', 'Interpreter', 'latex', 'FontName', ...
+                'Times New Roman', 'FontSize', 9);
+            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
+                'FontSize', 9);
+            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
+                'FontName', 'Times New Roman', 'FontSize', 9);
+
+            subplot(2, 3, 6);
+            plot(t, robot.q_his(6, :), 'b', 'LineWidth', 1.5);
+            grid on;
+            title('$q_6 (t)$', 'Interpreter', 'latex', 'FontName', ...
+                'Times New Roman', 'FontSize', 9);
+            xlabel('Time (s)', 'FontName', 'Times New Roman', ...
+                'FontSize', 9);
+            ylabel('Angle ($^\circ$)', 'interpreter', 'latex', ...
+                'FontName', 'Times New Roman', 'FontSize', 9);
+            
         end
     end
 end

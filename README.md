@@ -113,7 +113,7 @@ $$
             \end{matrix}
             \\
             \begin{matrix}
-                \omega_1 \\ omega_2 \\ ... \\ omega_n
+                \omega_1 \\ \omega_2 \\ ... \\ \omega_n
             \end{matrix}
         \end{bmatrix}
     \end{align},

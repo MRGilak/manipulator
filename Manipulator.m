@@ -32,7 +32,10 @@ classdef Manipulator < handle
         inertia    % 3x3xn array: inertia matrix of each link in its frame
         g0         % Gravity constant (default: 9810 mm/s^2)
         J_prev     % Previous COM Jacobian for computing J_dot
-        dt_prev    % Previous time step for J_dot computation
+        
+        % Inverse kinematics trajectory tracking
+        R_d_prev   % Previous desired rotation matrix
+        O_d_prev   % Previous desired position
     end
 
     methods
@@ -378,8 +381,6 @@ classdef Manipulator < handle
                 J_dot = (J_current - obj.J_prev) / dt;
                 obj.J_prev = J_current;
             end
-            
-            obj.dt_prev = dt;
         end
         
         %% Inertia matrix D (n x n)
@@ -403,11 +404,6 @@ classdef Manipulator < handle
         
         %% Coriolis/Centrifugal matrix C (n x n)
         function C = coriolisCentrifugalMatrix(obj, dt)
-            % Compute C = J^T * M * J_dot + J^T * S * J
-            if nargin < 2
-                dt = obj.dt_prev;
-            end
-            
             J = obj.jacobianCOM_all();
             M = obj.massMatrix();
             S = obj.coriolisMatrix();
@@ -430,6 +426,51 @@ classdef Manipulator < handle
             S = [0    -w(3)  w(2);
                  w(3)  0    -w(1);
                 -w(2)  w(1)  0   ];
+        end
+        
+        %% Extract vector from skew-symmetric matrix
+        function w = unskew(~, S)
+            w = [S(3,2); S(1,3); S(2,1)];
+        end
+        
+        %% Inverse kinematics from desired pose trajectory
+        function qdot_d = inverseKinematics(obj, R_d, O_d, varargin)
+            % Handle optional derivatives
+            if nargin >= 5
+                R_d_dot = varargin{1};
+                O_d_dot = varargin{2};
+                if nargin >= 6
+                    dt = varargin{3};
+                else
+                    dt = [];
+                end
+            else
+                dt = varargin{1};
+                % Numerical differentiation
+                if isempty(obj.R_d_prev) || isempty(obj.O_d_prev)
+                    R_d_dot = zeros(3, 3);
+                    O_d_dot = zeros(3, 1);
+                else
+                    R_d_dot = (R_d - obj.R_d_prev) / dt;
+                    O_d_dot = (O_d - obj.O_d_prev) / dt;
+                end
+                obj.R_d_prev = R_d;
+                obj.O_d_prev = O_d;
+            end
+            
+            % Extract omega_d from R_d_dot
+            S_omega = R_d_dot * R_d';
+            omega_d = obj.unskew(S_omega);
+            
+            % Compute desired end-effector velocity
+            v_d = [O_d_dot; omega_d];
+            
+            % Compute desired joint velocity using pseudo-inverse to handle singularities
+            J = obj.jacobian(obj.n);
+            
+            % Use damped least squares (more robust near singularities)
+            lambda = 0.01;  % Damping factor
+            qdot_d = J' * ((J * J' + lambda^2 * eye(6)) \ v_d);
         end
         
         %% Update frame position from linear velocity
@@ -864,7 +905,7 @@ classdef Manipulator < handle
                 v = p_curr - p_prev;
                 L = norm(v);
         
-                if L < eps
+                if L < 1e-10
                     continue;
                 end
         
@@ -872,7 +913,25 @@ classdef Manipulator < handle
                 Z = Z * L;
         
                 z0 = [0;0;1];
-                R = vrrotvec2mat(vrrotvec(z0, v / L));
+                v_normalized = v / L;
+                
+                % Ensure the normalized vector has unit length
+                mag = norm(v_normalized);
+                if mag < 1e-10
+                    continue;  % Skip if normalization failed
+                end
+                v_normalized = v_normalized / mag;  % Re-normalize
+                
+                % Check if normalized vector is parallel to z0 to avoid vrrotvec error
+                dot_product = dot(z0, v_normalized);
+                if abs(dot_product - 1) < 1e-6
+                    R = eye(3);  % No rotation needed if vectors are aligned
+                elseif abs(dot_product + 1) < 1e-6
+                    % Vectors are opposite, rotate 180 degrees around x-axis
+                    R = vrrotvec2mat([1 0 0 pi]);
+                else
+                    R = vrrotvec2mat(vrrotvec(z0, v_normalized));
+                end
         
                 P = R * [X(:)'; Y(:)'; Z(:)'];
                 Xr = reshape(P(1,:), size(X)) + p_prev(1);

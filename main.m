@@ -38,15 +38,21 @@ function main
     
     sim.plotConfig.q = true;
     sim.plotConfig.qdot = true;
+    sim.plotConfig.u = true;  % Torque
     % sim.plotConfig.debugInertia = true;
     % sim.plotConfig.debugSkewSymmetry = true;
+    
+    % Auto-save results when simulation stops
+    sim.plotConfig.saveResults = false;  % Set to true to auto-save
+    sim.plotConfig.saveFilename = 'sim_results.mat';  % Output filename
+    sim.plotConfig.saveExcel = false;  % Set to true to also save as Excel
 
     qdes = [0; 0; 0; pi/2; 0; -pi/2];
     qdotdes = zeros(6, 1);
     qddotdes = zeros(6, 1);
 
-    Kp = diag([100, 100, 100, 100, 10, 100]);
-    Kd = diag([100, 100, 100, 10, 10, 10]);
+    Kp = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
+    Kd = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
 
     % PD controller
     controller = Controller(robot, 'PD With Gravity Compensation', ...
@@ -54,5 +60,8 @@ function main
 
     sim.addController(controller);
 
-    sim.run();
+    sim.run('headless', false, 'draw', false);
+    
+    % To load and plot saved results, use:
+    % Simulation.loadAndPlot('sim_results.mat');
 end

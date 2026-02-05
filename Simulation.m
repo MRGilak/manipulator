@@ -9,6 +9,21 @@ classdef Simulation < handle
         time            % Current simulation time
         dt              % Time step for dynamic simulation
         plotConfig      % Configuration for plotting
+        controlTime     % Time since last control update
+        lastControl     % Last computed control input (zero-order hold)
+        headless        % Boolean flag for headless mode (no graphics)
+        
+        % Task-space trajectory tracking
+        trajectoryFunc  % Function handle: @(t) returns [R, O]
+        useTrajectory   % Boolean flag for trajectory tracking
+        R_prev          % Previous orientation for numerical differentiation
+        O_prev          % Previous position for numerical differentiation
+        
+        % History tracking for desired values
+        qdes_his        % Desired joint positions history
+        qdotdes_his     % Desired joint velocities history
+        O_his           % End-effector position history
+        Odes_his        % Desired end-effector position history
     end
     
     methods
@@ -17,10 +32,26 @@ classdef Simulation < handle
             obj.robots = {};
             obj.mode = 'manual';
             obj.time = 0;
-            obj.dt = 0.01;  % 10ms default time step
+            obj.dt = 0.01;
             obj.controls = struct();
+            obj.headless = false;
             
-            obj.plotConfig = struct('q', true, 'qdot', false, 'qddot', false, 'u', false);
+            obj.plotConfig = struct('q', true, 'qdot', false, 'qddot', false, 'u', false, ...
+                'saveResults', false, 'saveFilename', 'sim_results.mat');
+            obj.controlTime = 0;
+            obj.lastControl = [];
+            
+            % Trajectory tracking
+            obj.trajectoryFunc = [];
+            obj.useTrajectory = false;
+            obj.R_prev = [];
+            obj.O_prev = [];
+            
+            % History tracking
+            obj.qdes_his = [];
+            obj.qdotdes_his = [];
+            obj.O_his = [];
+            obj.Odes_his = [];
             
             % Add any robots passed to constructor
             for i = 1:nargin
@@ -45,11 +76,62 @@ classdef Simulation < handle
             end
         end
         
-        function run(obj)
-            % Create figure and UI, then run the simulation
-            obj.createFigure();
-            obj.createUI();
-            obj.draw();
+        function run(obj, varargin)
+            % Create figure and UI, then run the simulation            
+            % Parse optional arguments
+            p = inputParser;
+            addParameter(p, 'draw', true, @islogical);
+            addParameter(p, 'headless', false, @islogical);
+            addParameter(p, 'duration', 0, @isnumeric);  % Auto-run duration (0 = manual mode)
+            parse(p, varargin{:});
+            
+            % Store settings
+            obj.headless = p.Results.headless;
+            obj.plotConfig.drawRobot = p.Results.draw && ~obj.headless;
+            
+            % Only create figure and UI if not in headless mode
+            if ~obj.headless
+                obj.createFigure();
+                obj.createUI();
+                
+                % Only draw if enabled
+                if obj.plotConfig.drawRobot
+                    obj.draw();
+                end
+            else
+                % In headless mode with auto-run duration, start simulation automatically
+                if p.Results.duration > 0 && ismember(obj.mode, {'dynamic', 'task-space'})
+                    obj.runHeadless(p.Results.duration);
+                end
+            end
+        end
+        
+        function runHeadless(obj, duration)
+            % Run simulation in headless mode for a specified duration
+            if isempty(obj.robots)
+                return;
+            end
+            
+            fprintf('Running headless simulation for %.2f seconds...\n', duration);
+            
+            % Start the simulation
+            obj.startDynamicSim();
+            
+            % Wait for the specified duration
+            tic;
+            while toc < duration
+                pause(0.1);  % Small pause to prevent CPU overload
+            end
+            
+            % Stop the simulation
+            obj.stopDynamicSim();
+            
+            fprintf('Simulation complete. Time: %.2f s\n', obj.time);
+            
+            % Auto-save results if enabled
+            if obj.plotConfig.saveResults
+                obj.saveResults();
+            end
         end
         
         function createFigure(obj)
@@ -83,6 +165,8 @@ classdef Simulation < handle
                     obj.createTrajectoryControls();
                 case 'dynamic'
                     obj.createDynamicControls();
+                case 'task-space'
+                    obj.createTaskSpaceControls();
             end
         end
         
@@ -247,7 +331,7 @@ classdef Simulation < handle
                 'HorizontalAlignment','left');
             
             obj.controls.modeMenu = uicontrol('Style','popupmenu',...
-                'String',{'Manual','Velocity','Trajectory','Dynamic'},...
+                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space'},...
                 'Value',3,...  % Trajectory mode selected
                 'Units','normalized',...
                 'Position',[0.83 0.95 0.15 0.03],...
@@ -275,7 +359,7 @@ classdef Simulation < handle
                 'HorizontalAlignment','left');
             
             obj.controls.modeMenu = uicontrol('Style','popupmenu',...
-                'String',{'Manual','Velocity','Trajectory','Dynamic'},...
+                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space'},...
                 'Value',4,...
                 'Units','normalized',...
                 'Position',[0.83 0.95 0.15 0.03],...
@@ -327,6 +411,67 @@ classdef Simulation < handle
                 'Units','normalized',...
                 'Position',[0.83 0.35 0.15 0.03],...
                 'Callback',@(src,~) obj.changeController(src.Value));
+
+            % Plot Results
+            obj.controls.plotResultsBtn = uicontrol('Style','pushbutton',...
+                'String','Plot Results',...
+                'Units','normalized',...
+                'Position',[0.75 0.25 0.23 0.06],...
+                'FontSize',11,...
+                'Callback',@(~,~) obj.plotResults());
+        end
+        
+        function createTaskSpaceControls(obj)
+            % Task-space simulation controls
+            if isempty(obj.robots)
+                return;
+            end
+                        
+            % Mode selector
+            uicontrol('Style','text',...
+                'String','Mode:',...
+                'Units','normalized',...
+                'Position',[0.75 0.95 0.08 0.03],...
+                'HorizontalAlignment','left');
+            
+            obj.controls.modeMenu = uicontrol('Style','popupmenu',...
+                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space'},...
+                'Value',5,...
+                'Units','normalized',...
+                'Position',[0.83 0.95 0.15 0.03],...
+                'Callback',@(src,~) obj.changeMode(src.Value));
+            
+            % Time display
+            obj.controls.timeText = uicontrol('Style','text',...
+                'String','Time: 0.00 s',...
+                'Units','normalized',...
+                'Position',[0.75 0.75 0.23 0.03],...
+                'HorizontalAlignment','center',...
+                'FontSize',10);
+            
+            % Start/Stop button
+            obj.controls.startBtn = uicontrol('Style','pushbutton',...
+                'String','Start Simulation',...
+                'Units','normalized',...
+                'Position',[0.75 0.65 0.23 0.06],...
+                'FontSize',11,...
+                'Callback',@(~,~) obj.toggleTaskSpaceSim());
+            
+            % Reset button
+            obj.controls.resetBtn = uicontrol('Style','pushbutton',...
+                'String','Reset to Home',...
+                'Units','normalized',...
+                'Position',[0.75 0.55 0.23 0.05],...
+                'Callback',@(~,~) obj.resetDynamics());
+            
+            % Status text
+            obj.controls.statusText = uicontrol('Style','text',...
+                'String','Ready - Task-Space Control',...
+                'Units','normalized',...
+                'Position',[0.75 0.45 0.23 0.05],...
+                'HorizontalAlignment','center',...
+                'FontWeight','bold',...
+                'ForegroundColor',[0 0.5 0]);
 
             % Plot Results
             obj.controls.plotResultsBtn = uicontrol('Style','pushbutton',...
@@ -414,7 +559,7 @@ classdef Simulation < handle
         
         function changeMode(obj, modeIdx)
             % Change simulation mode
-            modes = {'manual', 'velocity', 'trajectory', 'dynamic'};
+            modes = {'manual', 'velocity', 'trajectory', 'dynamic', 'task-space'};
             obj.mode = modes{modeIdx};
             
             % Clear existing controls
@@ -482,6 +627,12 @@ classdef Simulation < handle
                 return;
             end
             
+            % Update UI first (only if not headless)
+            if ~obj.headless
+                set(obj.controls.startBtn, 'String', 'Stop Simulation');
+                set(obj.controls.statusText, 'String', 'Running', 'ForegroundColor', [1 0 0]);
+            end
+            
             % Create and start timer for dynamics integration
             obj.controls.dynamicsTimer = timer(...
                 'ExecutionMode','fixedRate',...
@@ -489,11 +640,23 @@ classdef Simulation < handle
                 'TimerFcn',@(~,~) obj.dynamicsTimerCallback());
             
             obj.time = 0;
-            start(obj.controls.dynamicsTimer);
+            obj.controlTime = 0;
+            obj.lastControl = [];
             
-            % Update UI
-            set(obj.controls.startBtn, 'String', 'Stop Simulation');
-            set(obj.controls.statusText, 'String', 'Running', 'ForegroundColor', [1 0 0]);
+            % Reset history tracking
+            obj.qdes_his = [];
+            obj.qdotdes_his = [];
+            obj.O_his = [];
+            obj.Odes_his = [];
+            
+            % Reset robot history
+            robot = obj.robots{1};
+            robot.q_his = [];
+            robot.qdot_his = [];
+            robot.qddot_his = [];
+            robot.u_his = [];
+            
+            start(obj.controls.dynamicsTimer);
         end
         
         function stopDynamicSim(obj)
@@ -504,9 +667,16 @@ classdef Simulation < handle
                 delete(obj.controls.dynamicsTimer);
             end
             
-            % Update UI
-            set(obj.controls.startBtn, 'String', 'Start Simulation');
-            set(obj.controls.statusText, 'String', 'Stopped', 'ForegroundColor', [1 0.5 0]);
+            % Auto-save results if enabled
+            if obj.plotConfig.saveResults
+                obj.saveResults();
+            end
+            
+            % Update UI (only if not headless)
+            if ~obj.headless
+                set(obj.controls.startBtn, 'String', 'Start Simulation');
+                set(obj.controls.statusText, 'String', 'Stopped', 'ForegroundColor', [1 0.5 0]);
+            end
         end
         
         function toggleDynamicSim(obj)
@@ -520,21 +690,41 @@ classdef Simulation < handle
             end
         end
         
+        function toggleTaskSpaceSim(obj)
+            % Toggle task-space simulation on/off
+            if isfield(obj.controls, 'dynamicsTimer') && ...
+               isvalid(obj.controls.dynamicsTimer) && ...
+               strcmp(obj.controls.dynamicsTimer.Running, 'on')
+                obj.stopDynamicSim();
+            else
+                obj.startDynamicSim();
+            end
+        end
+        
         function dynamicsTimerCallback(obj)
-            % Dynamic simulation integration: D*q_ddot + C*q_dot + G = u
             if isempty(obj.robots)
                 return;
             end
             
             robot = obj.robots{1};
+            controller = obj.controllers{1};
+            
+            % Update desired trajectory if using task-space trajectory
+            if obj.useTrajectory && ~isempty(obj.trajectoryFunc)
+                obj.updateDesiredFromTrajectory();
+            end
+            
+            % Zero-order hold: compute control at controller rate
+            if obj.controlTime >= controller.dt || isempty(obj.lastControl)
+                obj.lastControl = controller.uNext();
+                obj.controlTime = 0;
+            end
+            u = obj.lastControl;
             
             % Compute dynamics matrices
             D = robot.inertiaMatrix();
             C = robot.coriolisCentrifugalMatrix(obj.dt);
             G = robot.gravityTorque();
-            
-            controller = obj.controllers{1};
-            u = controller.uNext();
 
             % Solve for acceleration
             q_ddot = D \ (-C * robot.qdot - G + u);
@@ -559,15 +749,90 @@ classdef Simulation < handle
             robot.qddot_his(:, end+1) = q_ddot;
             robot.u_his(:, end+1) = u;
             
-            % Update visualization
-            robot.updateGraphics();
+            % Save desired values if available
+            if ~isempty(controller.qdes)
+                obj.qdes_his(:, end+1) = controller.qdes;
+            end
+            if ~isempty(controller.qdotdes)
+                obj.qdotdes_his(:, end+1) = controller.qdotdes;
+            end
+            
+            % Save end-effector position for task-space tracking
+            if obj.useTrajectory
+                T_current = robot.fk(robot.n);
+                obj.O_his(:, end+1) = T_current(1:3, 4);
+                if ~isempty(obj.trajectoryFunc)
+                    [~, O_d] = obj.trajectoryFunc(obj.time);
+                    obj.Odes_his(:, end+1) = O_d;
+                end
+            end
+            
+            % Update visualization (only if not headless)
+            if ~obj.headless
+                robot.updateGraphics();
+            end
             
             % Update time and display
             obj.time = obj.time + obj.dt;
-            set(obj.controls.timeText, 'String', sprintf('Time: %.2f s', obj.time));
-            drawnow limitrate;
+            obj.controlTime = obj.controlTime + obj.dt;
+            
+            % Update UI (only if not headless)
+            if ~obj.headless
+                set(obj.controls.timeText, 'String', sprintf('Time: %.2f s', obj.time));
+                drawnow limitrate;
+            end
         end
 
+        function updateDesiredFromTrajectory(obj)
+            % Compute qdes and qdotdes from task-space trajectory
+            robot = obj.robots{1};
+            controller = obj.controllers{1};
+            
+            % Get desired pose from trajectory
+            [R_d, O_d] = obj.trajectoryFunc(obj.time);
+            
+            % Numerical differentiation for velocity
+            if isempty(obj.R_prev) || isempty(obj.O_prev)
+                % First iteration: initialize
+                O_d_dot = zeros(3, 1);
+                omega_d = zeros(3, 1);
+            else
+                % Compute O_dot numerically
+                O_d_dot = (O_d - obj.O_prev) / obj.dt;
+                
+                % Compute omega from R_dot
+                R_d_dot = (R_d - obj.R_prev) / obj.dt;
+                S_omega = R_d_dot * R_d';
+                omega_d = robot.unskew(S_omega);
+            end
+            
+            % Store for next iteration
+            obj.R_prev = R_d;
+            obj.O_prev = O_d;
+            
+            % Desired end-effector velocity
+            v_d = [O_d_dot; omega_d];
+            
+            % Compute desired joint velocity using damped least squares
+            J = robot.jacobian(robot.n);
+            lambda = 0.01;
+            qdot_des = J' * ((J * J' + lambda^2 * eye(6)) \ v_d);
+            
+            % Integrate to get qdes
+            if isempty(controller.qdes)
+                controller.qdes = robot.q;
+            end
+            controller.qdes = controller.qdes + qdot_des * obj.dt;
+            controller.qdotdes = qdot_des;
+            
+            % For Slotine controller, also compute qddotdes
+            if strcmp(controller.type, 'Slotine')
+                if isempty(controller.qddotdes)
+                    controller.qddotdes = zeros(robot.n, 1);
+                end
+            end
+        end
+        
         function resetDynamics(obj)
             % Reset to home position and zero velocities
             if isempty(obj.robots)
@@ -584,13 +849,35 @@ classdef Simulation < handle
             for i = 1:length(obj.robots)
                 obj.robots{i}.q = zeros(obj.robots{i}.n, 1);
                 obj.robots{i}.qdot = zeros(obj.robots{i}.n, 1);
-                obj.robots{i}.updateGraphics();
+                obj.robots{i}.q_his = [];
+                obj.robots{i}.qdot_his = [];
+                obj.robots{i}.qddot_his = [];
+                obj.robots{i}.u_his = [];
+                if ~obj.headless
+                    obj.robots{i}.updateGraphics();
+                end
             end
+            
+            % Reset trajectory tracking
+            obj.R_prev = [];
+            obj.O_prev = [];
+            
+            % Reset history tracking
+            obj.qdes_his = [];
+            obj.qdotdes_his = [];
+            obj.O_his = [];
+            obj.Odes_his = [];
             
             % Reset time
             obj.time = 0;
-            set(obj.controls.timeText, 'String', 'Time: 0.00 s');
-            set(obj.controls.statusText, 'String', 'Ready', 'ForegroundColor', [0 0.5 0]);
+            obj.controlTime = 0;
+            obj.lastControl = [];
+            
+            % Update UI (only if not headless)
+            if ~obj.headless
+                set(obj.controls.timeText, 'String', 'Time: 0.00 s');
+                set(obj.controls.statusText, 'String', 'Ready', 'ForegroundColor', [0 0.5 0]);
+            end
         end
         
         function close(obj)
@@ -620,16 +907,29 @@ classdef Simulation < handle
             t = obj.dt:obj.dt:tf;
 
             if obj.plotConfig.q
-                obj.plotVariable(t, robot.q_his, 'q', 'Angle ($^\\circ$)');
+                if ~isempty(obj.qdes_his)
+                    obj.plotVariableWithRef(t, robot.q_his, obj.qdes_his, 'q', 'Angle (rad)');
+                else
+                    obj.plotVariable(t, robot.q_his, 'q', 'Angle (rad)');
+                end
             end
             if obj.plotConfig.qdot
-                obj.plotVariable(t, robot.qdot_his, '\\dot{q}', 'Velocity (rad/s)');
+                if ~isempty(obj.qdotdes_his)
+                    obj.plotVariableWithRef(t, robot.qdot_his, obj.qdotdes_his, '\\dot{q}', 'Velocity (rad/s)');
+                else
+                    obj.plotVariable(t, robot.qdot_his, '\\dot{q}', 'Velocity (rad/s)');
+                end
             end
             if obj.plotConfig.qddot
                 obj.plotVariable(t, robot.qddot_his, '\\ddot{q}', 'Acceleration (rad/s$^2$)');
             end
             if obj.plotConfig.u
                 obj.plotVariable(t, robot.u_his, 'u', 'Torque (N$\\cdot$mm)');
+            end
+            
+            % Plot end-effector position for task-space mode
+            if obj.useTrajectory && ~isempty(obj.O_his)
+                obj.plotEndEffector(t);
             end
         end
         
@@ -640,6 +940,231 @@ classdef Simulation < handle
                 subplot(2, 3, i);
                 plot(t, data(i, :), 'b', 'LineWidth', 1.5);
                 grid on;
+                xlim([0 max(t)]);
+                title(sprintf('$%s_%d (t)$', varName, i), 'Interpreter', 'latex', ...
+                    'FontName', 'Times New Roman', 'FontSize', 9);
+                xlabel('Time (s)', 'FontName', 'Times New Roman', 'FontSize', 9);
+                ylabel(yLabel, 'interpreter', 'latex', ...
+                    'FontName', 'Times New Roman', 'FontSize', 9);
+            end
+        end
+        
+        function plotVariableWithRef(obj, t, data, dataRef, varName, yLabel)
+            n = size(data, 1);
+            
+            % Ensure dataRef matches the size of data
+            minLen = min(size(data, 2), size(dataRef, 2));
+            if size(data, 2) ~= size(dataRef, 2)
+                warning('Data and reference have different lengths (%d vs %d). Truncating to %d samples.', ...
+                    size(data, 2), size(dataRef, 2), minLen);
+                data = data(:, 1:minLen);
+                dataRef = dataRef(:, 1:minLen);
+                t = t(1:minLen);
+            end
+            
+            figure('Name', sprintf('Joint %s', varName), 'Position', [10, 10, 1000, 800]);
+            for i = 1:n
+                subplot(2, 3, i);
+                plot(t, data(i, :), 'b', 'LineWidth', 1.5); hold on;
+                plot(t, dataRef(i, :), 'r--', 'LineWidth', 1.5);
+                grid on;
+                xlim([0 max(t)]);
+                legend('Actual', 'Desired', 'Location', 'best');
+                title(sprintf('$%s_%d (t)$', varName, i), 'Interpreter', 'latex', ...
+                    'FontName', 'Times New Roman', 'FontSize', 9);
+                xlabel('Time (s)', 'FontName', 'Times New Roman', 'FontSize', 9);
+                ylabel(yLabel, 'interpreter', 'latex', ...
+                    'FontName', 'Times New Roman', 'FontSize', 9);
+            end
+        end
+        
+        function plotEndEffector(obj, t)
+            % Plot end-effector position in task-space
+            figure('Name', 'End-Effector Position', 'Position', [50, 50, 1200, 800]);
+            
+            % 3D trajectory plot
+            subplot(2, 2, 1);
+            plot3(obj.O_his(1, :), obj.O_his(2, :), obj.O_his(3, :), 'b', 'LineWidth', 1.5); hold on;
+            if ~isempty(obj.Odes_his)
+                plot3(obj.Odes_his(1, :), obj.Odes_his(2, :), obj.Odes_his(3, :), 'r--', 'LineWidth', 1.5);
+                legend('Actual', 'Desired', 'Location', 'best');
+            end
+            grid on;
+            xlabel('X (mm)', 'FontName', 'Times New Roman');
+            ylabel('Y (mm)', 'FontName', 'Times New Roman');
+            zlabel('Z (mm)', 'FontName', 'Times New Roman');
+            title('End-Effector 3D Trajectory', 'FontName', 'Times New Roman');
+            view(3);
+            axis equal;
+            
+            % X vs time
+            subplot(2, 2, 2);
+            plot(t, obj.O_his(1, :), 'b', 'LineWidth', 1.5); hold on;
+            if ~isempty(obj.Odes_his)
+                plot(t, obj.Odes_his(1, :), 'r--', 'LineWidth', 1.5);
+                legend('Actual', 'Desired', 'Location', 'best');
+            end
+            grid on;
+            xlim([0 max(t)]);
+            xlabel('Time (s)', 'FontName', 'Times New Roman');
+            ylabel('X (mm)', 'FontName', 'Times New Roman');
+            title('End-Effector X Position', 'FontName', 'Times New Roman');
+            
+            % Y vs time
+            subplot(2, 2, 3);
+            plot(t, obj.O_his(2, :), 'b', 'LineWidth', 1.5); hold on;
+            if ~isempty(obj.Odes_his)
+                plot(t, obj.Odes_his(2, :), 'r--', 'LineWidth', 1.5);
+                legend('Actual', 'Desired', 'Location', 'best');
+            end
+            grid on;
+            xlim([0 max(t)]);
+            xlabel('Time (s)', 'FontName', 'Times New Roman');
+            ylabel('Y (mm)', 'FontName', 'Times New Roman');
+            title('End-Effector Y Position', 'FontName', 'Times New Roman');
+            
+            % Z vs time
+            subplot(2, 2, 4);
+            plot(t, obj.O_his(3, :), 'b', 'LineWidth', 1.5); hold on;
+            if ~isempty(obj.Odes_his)
+                plot(t, obj.Odes_his(3, :), 'r--', 'LineWidth', 1.5);
+                legend('Actual', 'Desired', 'Location', 'best');
+            end
+            grid on;
+            xlim([0 max(t)]);
+            xlabel('Time (s)', 'FontName', 'Times New Roman');
+            ylabel('Z (mm)', 'FontName', 'Times New Roman');
+            title('End-Effector Z Position', 'FontName', 'Times New Roman');
+        end
+        
+        function saveResults(obj, filename)
+            % Save simulation results to .mat file (and optionally Excel)
+            if nargin < 2
+                filename = obj.plotConfig.saveFilename;
+            end
+            
+            robot = obj.robots{1};
+            
+            % Prepare data structure
+            results = struct();
+            results.dt = obj.dt;
+            results.time = obj.time;
+            results.q = robot.q_his;
+            results.qdot = robot.qdot_his;
+            results.qddot = robot.qddot_his;
+            results.u = robot.u_his;
+            results.qdes = obj.qdes_his;
+            results.qdotdes = obj.qdotdes_his;
+            results.O = obj.O_his;
+            results.Odes = obj.Odes_his;
+            results.mode = obj.mode;
+            
+            % Save to .mat file
+            save(filename, 'results');
+            fprintf('Results saved to %s\\n', filename);
+            
+            % Optionally save to Excel if requested
+            if isfield(obj.plotConfig, 'saveExcel') && obj.plotConfig.saveExcel
+                [~, name, ~] = fileparts(filename);
+                excelFile = [name '.xlsx'];
+                obj.saveToExcel(excelFile, results);
+            end
+        end
+        
+        function saveToExcel(obj, filename, results)
+            % Save results to Excel file
+            t = (results.dt:results.dt:size(results.q, 2)*results.dt)';
+            
+            % Prepare data table
+            n = size(results.q, 1);
+            varNames = {'Time'};
+            data = t;
+            
+            for i = 1:n
+                varNames{end+1} = sprintf('q%d', i);
+                data = [data results.q(i, :)'];
+            end
+            for i = 1:n
+                varNames{end+1} = sprintf('qdot%d', i);
+                data = [data results.qdot(i, :)'];
+            end
+            for i = 1:n
+                varNames{end+1} = sprintf('u%d', i);
+                data = [data results.u(i, :)'];
+            end
+            if ~isempty(results.qdes) && size(results.qdes, 2) == size(results.q, 2)
+                for i = 1:n
+                    varNames{end+1} = sprintf('qdes%d', i);
+                    data = [data results.qdes(i, :)'];
+                end
+            end
+            
+            % Write to Excel
+            T = array2table(data, 'VariableNames', varNames);
+            writetable(T, filename);
+            fprintf('Results saved to %s\n', filename);
+        end
+    end
+    
+    methods(Static)
+        function loadAndPlot(filename, varargin)
+            % Load and plot/visualize results from saved file
+            % Usage: Simulation.loadAndPlot('sim_results.mat')
+            %        Simulation.loadAndPlot('sim_results.mat', 'plot', true, 'animate', false)
+            
+            p = inputParser;
+            addParameter(p, 'plot', true, @islogical);
+            addParameter(p, 'animate', false, @islogical);
+            parse(p, varargin{:});
+            
+            % Load data
+            data = load(filename);
+            results = data.results;
+            
+            fprintf('Loaded simulation results from %s\n', filename);
+            fprintf('  Duration: %.2f s\n', results.time);
+            fprintf('  Samples: %d\n', size(results.q, 2));
+            
+            % Plot results
+            if p.Results.plot
+                tf = size(results.q, 2) * results.dt;
+                t = results.dt:results.dt:tf;
+                
+                % Plot q
+                if ~isempty(results.q)
+                    Simulation.plotVariableStatic(t, results.q, results.qdes, 'q', 'Angle (rad)');
+                end
+                
+                % Plot qdot
+                if ~isempty(results.qdot)
+                    Simulation.plotVariableStatic(t, results.qdot, results.qdotdes, '\\dot{q}', 'Velocity (rad/s)');
+                end
+                
+                % Plot u
+                if ~isempty(results.u)
+                    Simulation.plotVariableStatic(t, results.u, [], 'u', 'Torque (N$\\cdot$mm)');
+                end
+            end
+            
+            % Animate robot
+            if p.Results.animate
+                warning('Animation from saved data not yet implemented.');
+            end
+        end
+        
+        function plotVariableStatic(t, data, dataRef, varName, yLabel)
+            % Static plotting method for loaded data
+            n = size(data, 1);
+            figure('Name', sprintf('Joint %s', varName), 'Position', [10, 10, 1000, 800]);
+            for i = 1:n
+                subplot(2, 3, i);
+                plot(t, data(i, :), 'b', 'LineWidth', 1.5); hold on;
+                if ~isempty(dataRef) && size(dataRef, 2) == size(data, 2)
+                    plot(t, dataRef(i, :), 'r--', 'LineWidth', 1.5);
+                    legend('Actual', 'Desired', 'Location', 'best');
+                end
+                grid on;
+                xlim([0 max(t)]);
                 title(sprintf('$%s_%d (t)$', varName, i), 'Interpreter', 'latex', ...
                     'FontName', 'Times New Roman', 'FontSize', 9);
                 xlabel('Time (s)', 'FontName', 'Times New Roman', 'FontSize', 9);

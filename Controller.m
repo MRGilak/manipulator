@@ -4,7 +4,7 @@ classdef Controller < handle
         robot       % the manipulator robot 
         dt          % control timestep
 
-        % Desired values
+        % Desired values (joint space)
         qdes
         qdotdes
         qddotdes

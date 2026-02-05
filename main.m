@@ -64,4 +64,6 @@ function main
     
     % To load and plot saved results, use:
     % Simulation.loadAndPlot('sim_results.mat');
+    % To animate saved results:
+    % Simulation.loadAndPlot('sim_results.mat', 'animate', true);
 end

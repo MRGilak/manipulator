@@ -1059,6 +1059,14 @@ classdef Simulation < handle
             results.Odes = obj.Odes_his;
             results.mode = obj.mode;
             
+            % Save robot parameters for reconstruction
+            results.robot = struct();
+            results.robot.a = robot.a;
+            results.robot.d = robot.d;
+            results.robot.alpha = robot.alpha;
+            results.robot.jointType = robot.jointType;
+            results.robot.visual = robot.visual;
+            
             % Save to .mat file
             save(filename, 'results');
             fprintf('Results saved to %s\\n', filename);
@@ -1146,10 +1154,64 @@ classdef Simulation < handle
                 end
             end
             
-            % Animate robot
-            if p.Results.animate
-                warning('Animation from saved data not yet implemented.');
+            % Animate robot (if requested)
+            if p.Results.animate && isfield(results, 'robot')
+                Simulation.animateFromData(results);
+            elseif p.Results.animate
+                warning('Robot parameters not found in saved file. Animation requires robot parameters.');
             end
+        end
+        
+        function animateFromData(results)
+            % Animate robot motion from saved results
+            % Create robot from saved parameters
+            robot = Manipulator(results.robot.a, results.robot.d, ...
+                results.robot.alpha, results.robot.jointType);
+            robot.visual = results.robot.visual;
+            
+            % Create figure for animation
+            fig = figure('Name', 'Simulation Playback', 'Position', [100, 100, 1000, 800]);
+            ax = axes('Parent', fig, 'Position', [0.05 0.1 0.9 0.85]);
+            grid(ax, 'on');
+            xlabel(ax, 'X (mm)');
+            ylabel(ax, 'Y (mm)');
+            zlabel(ax, 'Z (mm)');
+            view(ax, 3);
+            rotate3d(ax, 'on');
+            hold(ax, 'on');
+            
+            % Time controls
+            uicontrol('Style', 'text', 'String', 'Time: 0.00 s', ...
+                'Units', 'normalized', 'Position', [0.4 0.02 0.2 0.04], ...
+                'Tag', 'timeText', 'FontSize', 10, 'HorizontalAlignment', 'center');
+            
+            % Animation loop
+            nSamples = size(results.q, 2);
+            fprintf('Animating %d samples (%.2f seconds)...\n', nSamples, results.time);
+            
+            for i = 1:nSamples
+                % Update robot configuration
+                robot.q = results.q(:, i);
+                
+                % Draw robot
+                cla(ax);
+                robot.draw(ax);
+                
+                % Update time display
+                t = i * results.dt;
+                timeText = findobj(fig, 'Tag', 'timeText');
+                if ~isempty(timeText)
+                    set(timeText, 'String', sprintf('Time: %.2f s', t));
+                end
+                
+                % Real-time playback
+                drawnow;
+                if i < nSamples
+                    pause(results.dt);
+                end
+            end
+            
+            fprintf('Animation complete.\n');
         end
         
         function plotVariableStatic(t, data, dataRef, varName, yLabel)

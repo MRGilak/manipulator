@@ -408,9 +408,10 @@ classdef Simulation < handle
                 'Position',[0.75 0.35 0.08 0.03],...
                 'HorizontalAlignment','left');
             
+            % Get available controllers based on mode
+            controllerList = obj.getAvailableControllers();
             obj.controls.controlMenu = uicontrol('Style','popupmenu',...
-                'String',{'Open Loop','Gravity Compensation','PD', ...
-                'PD With Gravity Compensation', 'Slotine'},...
+                'String',controllerList,...
                 'Value',1,...
                 'Units','normalized',...
                 'Position',[0.83 0.35 0.15 0.03],...
@@ -545,9 +546,10 @@ classdef Simulation < handle
                 'Position',[0.75 0.35 0.08 0.03],...
                 'HorizontalAlignment','left');
             
+            % Get available controllers based on mode
+            controllerList = obj.getAvailableControllers();
             obj.controls.controlMenu = uicontrol('Style','popupmenu',...
-                'String',{'Open Loop','Gravity Compensation','PD', ...
-                'PD With Gravity Compensation', 'Slotine'},...
+                'String',controllerList,...
                 'Value',1,...
                 'Units','normalized',...
                 'Position',[0.83 0.35 0.15 0.03],...
@@ -650,9 +652,21 @@ classdef Simulation < handle
         end
 
         function changeController(obj, controllerIdx)
-            % Change simulation mode
-            types = {'Open-Loop', 'Gravity Compensation', 'PD', 'PD With Gravity Compensation', 'Slotine'};
+            % Change controller type based on available controllers for current mode
+            types = obj.getAvailableControllers();
             obj.controllers{1}.type = types{controllerIdx};
+        end
+        
+        function controllerList = getAvailableControllers(obj)
+            % Return list of controllers available for current simulation mode
+            % Constrained mode: Force-motion only
+            % Unconstrained modes: Open-Loop, Gravity Compensation, PD, PD+Gravity, Slotine
+            if strcmp(obj.mode, 'constrained')
+                controllerList = {'Force-motion'};
+            else
+                controllerList = {'Open-Loop', 'Gravity Compensation', 'PD', ...
+                                  'PD With Gravity Compensation', 'Slotine'};
+            end
         end
         
         function clearControls(obj)
@@ -935,13 +949,14 @@ classdef Simulation < handle
             lambda_dls = 0.01;
             qdot_des = J' * ((J * J' + lambda_dls^2 * eye(6)) \ v_d);
             
-            % Integrate to get qdes
+            % Compute qdes directly from IK to avoid drift
+            T_d = [R_d, O_d; 0 0 0 1];
             if isempty(controller.qdes)
-                % Initialize using IK to match the desired trajectory at t=0
-                T_d = [R_d, O_d; 0 0 0 1];
-                controller.qdes = robot.ik(T_d, robot.q);
+                q_init = robot.q;
+            else
+                q_init = controller.qdes;
             end
-            controller.qdes = controller.qdes + qdot_des * obj.dt;
+            controller.qdes = robot.ik(T_d, q_init, 50, 1e-4);  % max_iter=50, tol=1e-4
             
             % For Force-motion controller, compute qddotdes and F_des first (before updating qdotdes)
             if strcmp(controller.type, 'Force-motion')
@@ -956,17 +971,14 @@ classdef Simulation < handle
                 qddot_des = (qdot_des - qdot_des_prev) / obj.dt;
                 controller.qddotdes = qddot_des;
                 
-                % Compute desired constraint force to maintain constraint
-                if ~isempty(robot.J_e)
-                    % Map gravity torques to task space using pseudo-inverse of J'
-                    G = robot.gravityTorque();
-                    J_pinv_T = pinv(J');  % Pseudo-inverse of J transpose
-                    F_gravity = J_pinv_T * G;  % Task-space gravity equivalent
-                    
-                    % For z-constraint, desired force is primarily in z-direction
-                    % Use projection of gravity force onto constraint direction
-                    controller.F_des = [0; 0; F_gravity(3); 0; 0; 0];
-                end
+                % F_des is kept constant at the value set in the main script
+                % If automatic gravity compensation is desired, uncomment below:
+                % if ~isempty(robot.J_e)
+                %     G = robot.gravityTorque();
+                %     J_pinv_T = pinv(J');
+                %     F_gravity = J_pinv_T * G;
+                %     controller.F_des = [0; 0; F_gravity(3); 0; 0; 0];
+                % end
             end
             
             % Update qdotdes after computing qddotdes

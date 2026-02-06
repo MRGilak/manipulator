@@ -38,14 +38,6 @@ function circle_trajectory
     
     sim.plotConfig.q = true;
     sim.plotConfig.qdot = true;
-    % sim.plotConfig.u = true;  % Torque
-    % sim.plotConfig.debugInertia = true;
-    % sim.plotConfig.debugSkewSymmetry = true;
-    
-    % Auto-save results when simulation stops
-    sim.plotConfig.saveResults = false;  % Set to true to auto-save
-    sim.plotConfig.saveFilename = 'sim_results.mat';  % Output filename
-    sim.plotConfig.saveExcel = false;  % Set to true to also save as Excel
 
     %% Get initial end-effector pose
     T_init = robot.fk(robot.n);
@@ -64,41 +56,21 @@ function circle_trajectory
     sim.useTrajectory = true;
 
     %% Controller setup
-    % Initial desired position (will be updated by trajectory)
+    % Initial desired position
     qdes = robot.q;
     qdotdes = zeros(6, 1);
     qddotdes = zeros(6, 1);
 
-    Kp = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
-    Kd = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
     Lambda = 0.005 * diag([1000, 1000, 1000, 100, 100, 100]);
     K = 1000 * diag([1000, 1000, 1000, 100, 100, 100]);
-
-    % PD controller
-    % controller = Controller(robot, 'PD', ...
-    %   0.01, Kp, Kd, qdes);
-
-    % PD controller with gravity compensation
-    % controller = Controller(robot, 'PD With Gravity Compensation', ...
-    %  0.01, Kp, Kd, qdes);
 
     % Slotine controller
      controller = Controller(robot, 'Slotine', ...
          0.01, Lambda, K, qdes, qdotdes, qddotdes);
     
-    % Actuator saturation (optional)
-    % controller.setSaturation(1e6, -1e6);  % Symmetric limits
-    % controller.setSaturation([1e6; 1e6; 1e6; 1e5; 1e5; 1e5], ...
-    %                          -[1e6; 1e6; 1e6; 1e5; 1e5; 1e5]);  % Per-joint limits
-
     sim.addController(controller);
 
     sim.run('headless', false, 'draw', true);
-    
-    % To load and plot saved results, use:
-    % Simulation.loadAndPlot('sim_results.mat');
-    % To animate saved results:
-    % Simulation.loadAndPlot('sim_results.mat', 'animate', true);
 end
 
 function [R, O] = circleTrajectory(t, T_total, R_d, O_center, radius)

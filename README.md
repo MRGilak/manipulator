@@ -22,7 +22,7 @@ The following shows the manipulator in action in different cases.
 
 - Length is in **mm**.
 - Time is in **s**.
-- Default gravity is $g_0 = 9810 mm/s^2$ in [Manipulator](Manipulator).
+- Default gravity is $g_0 = 9810 mm/s^2$ in [Manipulator](Manipulator.m).
 
 This is a consistent mm–s system. If you set link masses in kg (as in the examples), the implied force unit becomes kg·mm/s^2, i.e. _milli-Newtons_. That’s why you’ll see things like `F_des = 2000` being treated as 2N. Same story for torques (they end up in a scaled mm-based unit).
 
@@ -139,19 +139,21 @@ $$
 The constrained equations of motion are solved via an augmented system with $\lambda$:
 
 $$
-\begin{bmatrix}
-D & J^T J_e^T\\
-J_e J & 0
-\end{bmatrix}
-\begin{bmatrix}
-\ddot q\\
-\lambda
-\end{bmatrix}
-=
-\begin{bmatrix}
-	\tau - C\dot q - G\\
--(\dot J_e\,J + J_e\,\dot J)\dot q
-\end{bmatrix}.
+\begin{align}
+	\begin{bmatrix}
+	D & J^T J_e^T \\
+	J_e J & 0
+	\end{bmatrix}
+	\begin{bmatrix}
+	\ddot q \\
+	\lambda
+	\end{bmatrix}
+	=
+	\begin{bmatrix}
+	\tau - C\dot q - G \\
+	-(\dot J_e\ J + J_e\ \dot J)\dot q
+	\end{bmatrix}.
+\end{align}
 $$
 
 In the code:
@@ -177,7 +179,7 @@ All controllers are in the `Controller` class and are selected via `controller.t
 Just outputs zero torque:
 
 $$
-	au = 0.
+	\tau = 0.
 $$
 
 Useful for sanity-checking the passive dynamics.

@@ -24,6 +24,7 @@ classdef Simulation < handle
         qdotdes_his     % Desired joint velocities history
         O_his           % End-effector position history
         Odes_his        % Desired end-effector position history
+        F_des_his       % Desired constraint force history
     end
     
     methods
@@ -52,6 +53,7 @@ classdef Simulation < handle
             obj.qdotdes_his = [];
             obj.O_his = [];
             obj.Odes_his = [];
+            obj.F_des_his = [];
             
             % Add any robots passed to constructor
             for i = 1:nargin
@@ -167,6 +169,8 @@ classdef Simulation < handle
                     obj.createDynamicControls();
                 case 'task-space'
                     obj.createTaskSpaceControls();
+                case 'constrained'
+                    obj.createConstrainedControls();
             end
         end
         
@@ -359,7 +363,7 @@ classdef Simulation < handle
                 'HorizontalAlignment','left');
             
             obj.controls.modeMenu = uicontrol('Style','popupmenu',...
-                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space'},...
+                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space','Constrained'},...
                 'Value',4,...
                 'Units','normalized',...
                 'Position',[0.83 0.95 0.15 0.03],...
@@ -435,7 +439,7 @@ classdef Simulation < handle
                 'HorizontalAlignment','left');
             
             obj.controls.modeMenu = uicontrol('Style','popupmenu',...
-                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space'},...
+                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space','Constrained'},...
                 'Value',5,...
                 'Units','normalized',...
                 'Position',[0.83 0.95 0.15 0.03],...
@@ -472,6 +476,82 @@ classdef Simulation < handle
                 'HorizontalAlignment','center',...
                 'FontWeight','bold',...
                 'ForegroundColor',[0 0.5 0]);
+
+            % Plot Results
+            obj.controls.plotResultsBtn = uicontrol('Style','pushbutton',...
+                'String','Plot Results',...
+                'Units','normalized',...
+                'Position',[0.75 0.25 0.23 0.06],...
+                'FontSize',11,...
+                'Callback',@(~,~) obj.plotResults());
+        end
+        
+        function createConstrainedControls(obj)
+            % Constrained dynamic simulation controls
+            if isempty(obj.robots)
+                return;
+            end
+                        
+            % Mode selector
+            uicontrol('Style','text',...
+                'String','Mode:',...
+                'Units','normalized',...
+                'Position',[0.75 0.95 0.08 0.03],...
+                'HorizontalAlignment','left');
+            
+            obj.controls.modeMenu = uicontrol('Style','popupmenu',...
+                'String',{'Manual','Velocity','Trajectory','Dynamic','Task-Space','Constrained'},...
+                'Value',6,...
+                'Units','normalized',...
+                'Position',[0.83 0.95 0.15 0.03],...
+                'Callback',@(src,~) obj.changeMode(src.Value));
+            
+            % Time display
+            obj.controls.timeText = uicontrol('Style','text',...
+                'String','Time: 0.00 s',...
+                'Units','normalized',...
+                'Position',[0.75 0.75 0.23 0.03],...
+                'HorizontalAlignment','center',...
+                'FontSize',10);
+            
+            % Start/Stop button
+            obj.controls.startBtn = uicontrol('Style','pushbutton',...
+                'String','Start Simulation',...
+                'Units','normalized',...
+                'Position',[0.75 0.65 0.23 0.06],...
+                'FontSize',11,...
+                'Callback',@(~,~) obj.toggleDynamicSim());
+            
+            % Reset button
+            obj.controls.resetBtn = uicontrol('Style','pushbutton',...
+                'String','Reset to Home',...
+                'Units','normalized',...
+                'Position',[0.75 0.55 0.23 0.05],...
+                'Callback',@(~,~) obj.resetDynamics());
+            
+            % Status text
+            obj.controls.statusText = uicontrol('Style','text',...
+                'String','Ready - Constrained Dynamics',...
+                'Units','normalized',...
+                'Position',[0.75 0.45 0.23 0.05],...
+                'HorizontalAlignment','center',...
+                'FontWeight','bold',...
+                'ForegroundColor',[0 0.5 0]);
+
+            % Controller selector
+            uicontrol('Style','text',...
+                'String','Controller:',...
+                'Units','normalized',...
+                'Position',[0.75 0.35 0.08 0.03],...
+                'HorizontalAlignment','left');
+            
+            obj.controls.controlMenu = uicontrol('Style','popupmenu',...
+                'String',{'Open Loop','Gravity Compensation','PD', ...
+                'PD With Gravity Compensation', 'Slotine'},...
+                'Value',1,...
+                'Units','normalized',...
+                'Position',[0.83 0.35 0.15 0.03],...
+                'Callback',@(src,~) obj.changeController(src.Value));
 
             % Plot Results
             obj.controls.plotResultsBtn = uicontrol('Style','pushbutton',...
@@ -559,7 +639,7 @@ classdef Simulation < handle
         
         function changeMode(obj, modeIdx)
             % Change simulation mode
-            modes = {'manual', 'velocity', 'trajectory', 'dynamic', 'task-space'};
+            modes = {'manual', 'velocity', 'trajectory', 'dynamic', 'task-space', 'constrained'};
             obj.mode = modes{modeIdx};
             
             % Clear existing controls
@@ -648,6 +728,7 @@ classdef Simulation < handle
             obj.qdotdes_his = [];
             obj.O_his = [];
             obj.Odes_his = [];
+            obj.F_des_his = [];
             
             % Reset robot history
             robot = obj.robots{1};
@@ -721,13 +802,37 @@ classdef Simulation < handle
             end
             u = obj.lastControl;
             
-            % Compute dynamics matrices
-            D = robot.inertiaMatrix();
-            C = robot.coriolisCentrifugalMatrix(obj.dt);
-            G = robot.gravityTorque();
+            % Compute dynamics based on mode
+            if strcmp(obj.mode, 'constrained')
+                % Use constrained dynamics
+                [q_ddot, lambda, F] = robot.constrainedDynamics(u, obj.dt);
+                
+                % Save constraint forces
+                if isempty(robot.lambda_his)
+                    robot.lambda_his = lambda;
+                    robot.F_his = F;
+                else
+                    robot.lambda_his(:, end+1) = lambda;
+                    robot.F_his(:, end+1) = F;
+                end
+                
+                % Save desired constraint force if using Force-motion controller
+                if strcmp(controller.type, 'Force-motion') && ~isempty(controller.F_des)
+                    if isempty(obj.F_des_his)
+                        obj.F_des_his = controller.F_des;
+                    else
+                        obj.F_des_his(:, end+1) = controller.F_des;
+                    end
+                end
+            else
+                % Standard unconstrained dynamics
+                D = robot.inertiaMatrix();
+                C = robot.coriolisCentrifugalMatrix(obj.dt);
+                G = robot.gravityTorque();
 
-            % Solve for acceleration
-            q_ddot = D \ (-C * robot.qdot - G + u);
+                % Solve for acceleration
+                q_ddot = D \ (-C * robot.qdot - G + u);
+            end
              
             % Integrate velocity
             robot.qdot = robot.qdot + q_ddot * obj.dt;
@@ -761,12 +866,16 @@ classdef Simulation < handle
             if obj.useTrajectory
                 T_current = robot.fk(robot.n);
                 obj.O_his(:, end+1) = T_current(1:3, 4);
-                if ~isempty(obj.trajectoryFunc)
-                    [~, O_d] = obj.trajectoryFunc(obj.time);
-                    obj.Odes_his(:, end+1) = O_d;
+                if ~isempty(obj.trajectoryFunc) && ~isempty(controller.qdes)
+                    % Store the FK of controller.qdes as the actual desired trajectory
+                    q_save = robot.q;  % Save current state
+                    robot.q = controller.qdes;  % Temporarily set to desired
+                    T_des = robot.fk(robot.n);
+                    robot.q = q_save;  % Restore current state
+                    obj.Odes_his(:, end+1) = T_des(1:3, 4);
                 end
             end
-            
+
             % Update visualization (only if not headless)
             if ~obj.headless
                 robot.updateGraphics();
@@ -789,40 +898,78 @@ classdef Simulation < handle
             controller = obj.controllers{1};
             
             % Get desired pose from trajectory
-            [R_d, O_d] = obj.trajectoryFunc(obj.time);
-            
-            % Numerical differentiation for velocity
-            if isempty(obj.R_prev) || isempty(obj.O_prev)
-                % First iteration: initialize
-                O_d_dot = zeros(3, 1);
-                omega_d = zeros(3, 1);
+            % Check if trajectory function returns velocities
+            nout = nargout(obj.trajectoryFunc);
+            if nout >= 4
+                % Trajectory provides velocities
+                [R_d, O_d, v_d_linear, omega_d] = obj.trajectoryFunc(obj.time);
+                v_d = [v_d_linear; omega_d];
             else
-                % Compute O_dot numerically
-                O_d_dot = (O_d - obj.O_prev) / obj.dt;
+                % Trajectory only provides pose, compute velocities numerically
+                [R_d, O_d] = obj.trajectoryFunc(obj.time);
                 
-                % Compute omega from R_dot
-                R_d_dot = (R_d - obj.R_prev) / obj.dt;
-                S_omega = R_d_dot * R_d';
-                omega_d = robot.unskew(S_omega);
+                % Numerical differentiation for velocity
+                if isempty(obj.R_prev) || isempty(obj.O_prev)
+                    % First iteration: initialize
+                    O_d_dot = zeros(3, 1);
+                    omega_d = zeros(3, 1);
+                else
+                    % Compute O_dot numerically
+                    O_d_dot = (O_d - obj.O_prev) / obj.dt;
+                    
+                    % Compute omega from R_dot
+                    R_d_dot = (R_d - obj.R_prev) / obj.dt;
+                    S_omega = R_d_dot * R_d';
+                    omega_d = robot.unskew(S_omega);
+                end
+                
+                v_d = [O_d_dot; omega_d];
             end
             
             % Store for next iteration
             obj.R_prev = R_d;
             obj.O_prev = O_d;
             
-            % Desired end-effector velocity
-            v_d = [O_d_dot; omega_d];
-            
             % Compute desired joint velocity using damped least squares
             J = robot.jacobian(robot.n);
-            lambda = 0.01;
-            qdot_des = J' * ((J * J' + lambda^2 * eye(6)) \ v_d);
+            lambda_dls = 0.01;
+            qdot_des = J' * ((J * J' + lambda_dls^2 * eye(6)) \ v_d);
             
             % Integrate to get qdes
             if isempty(controller.qdes)
-                controller.qdes = robot.q;
+                % Initialize using IK to match the desired trajectory at t=0
+                T_d = [R_d, O_d; 0 0 0 1];
+                controller.qdes = robot.ik(T_d, robot.q);
             end
             controller.qdes = controller.qdes + qdot_des * obj.dt;
+            
+            % For Force-motion controller, compute qddotdes and F_des first (before updating qdotdes)
+            if strcmp(controller.type, 'Force-motion')
+                % Compute qddotdes from velocity derivative (use old qdotdes)
+                if isempty(controller.qdotdes) || length(controller.qdotdes) ~= robot.n
+                    qdot_des_prev = zeros(robot.n, 1);
+                elseif all(controller.qdotdes == 0)
+                    qdot_des_prev = zeros(robot.n, 1);
+                else
+                    qdot_des_prev = controller.qdotdes;
+                end
+                qddot_des = (qdot_des - qdot_des_prev) / obj.dt;
+                controller.qddotdes = qddot_des;
+                
+                % Compute desired constraint force to maintain constraint
+                if ~isempty(robot.J_e)
+                    % Map gravity torques to task space using pseudo-inverse of J'
+                    G = robot.gravityTorque();
+                    J_pinv_T = pinv(J');  % Pseudo-inverse of J transpose
+                    F_gravity = J_pinv_T * G;  % Task-space gravity equivalent
+                    
+                    % For z-constraint, desired force is primarily in z-direction
+                    % Use projection of gravity force onto constraint direction
+                    controller.F_des = [0; 0; F_gravity(3); 0; 0; 0];
+                end
+            end
+            
+            % Update qdotdes after computing qddotdes
             controller.qdotdes = qdot_des;
             
             % For Slotine controller, also compute qddotdes
@@ -853,6 +1000,8 @@ classdef Simulation < handle
                 obj.robots{i}.qdot_his = [];
                 obj.robots{i}.qddot_his = [];
                 obj.robots{i}.u_his = [];
+                obj.robots{i}.lambda_his = [];
+                obj.robots{i}.F_his = [];
                 if ~obj.headless
                     obj.robots{i}.updateGraphics();
                 end
@@ -867,6 +1016,7 @@ classdef Simulation < handle
             obj.qdotdes_his = [];
             obj.O_his = [];
             obj.Odes_his = [];
+            obj.F_des_his = [];
             
             % Reset time
             obj.time = 0;
@@ -915,21 +1065,32 @@ classdef Simulation < handle
             end
             if obj.plotConfig.qdot
                 if ~isempty(obj.qdotdes_his)
-                    obj.plotVariableWithRef(t, robot.qdot_his, obj.qdotdes_his, '\\dot{q}', 'Velocity (rad/s)');
+                    obj.plotVariableWithRef(t, robot.qdot_his, obj.qdotdes_his, 'qdot', 'Velocity (rad/s)');
                 else
-                    obj.plotVariable(t, robot.qdot_his, '\\dot{q}', 'Velocity (rad/s)');
+                    obj.plotVariable(t, robot.qdot_his, 'qdot', 'Velocity (rad/s)');
                 end
             end
             if obj.plotConfig.qddot
-                obj.plotVariable(t, robot.qddot_his, '\\ddot{q}', 'Acceleration (rad/s$^2$)');
+                obj.plotVariable(t, robot.qddot_his, 'qddot', 'Acceleration (rad/s^2)');
             end
             if obj.plotConfig.u
-                obj.plotVariable(t, robot.u_his, 'u', 'Torque (N$\\cdot$mm)');
+                obj.plotVariable(t, robot.u_his, 'u', 'Torque (N.mm)');
+            end
+            
+            % Plot constraint forces if in constrained mode
+            if strcmp(obj.mode, 'constrained') && ~isempty(robot.lambda_his)
+                obj.plotVariable(t, robot.lambda_his, 'lambda', 'Lagrange Multipliers');
+                if ~isempty(obj.F_des_his)
+                    obj.plotVariableWithRef(t, robot.F_his, obj.F_des_his, 'F', 'Constraint Forces (N)');
+                else
+                    obj.plotVariable(t, robot.F_his, 'F', 'Constraint Forces (N)');
+                end
             end
             
             % Plot end-effector position for task-space mode
             if obj.useTrajectory && ~isempty(obj.O_his)
                 obj.plotEndEffector(t);
+                obj.plotCircularTrajectory2D(t);
             end
         end
         
@@ -980,7 +1141,7 @@ classdef Simulation < handle
         
         function plotEndEffector(obj, t)
             % Plot end-effector position in task-space
-            figure('Name', 'End-Effector Position', 'Position', [50, 50, 1200, 800]);
+            figure('Name', 'End-Effector Position', 'Position', [10 10 1000 800]);
             
             % 3D trajectory plot
             subplot(2, 2, 1);
@@ -1035,6 +1196,41 @@ classdef Simulation < handle
             xlabel('Time (s)', 'FontName', 'Times New Roman');
             ylabel('Z (mm)', 'FontName', 'Times New Roman');
             title('End-Effector Z Position', 'FontName', 'Times New Roman');
+        end
+        
+        function plotCircularTrajectory2D(obj, t)
+            % Plot 2D circular trajectory with time-based coloring
+            figure('Name', 'Circular Trajectory 2D', 'Position', [10 10 1000 800]);
+            
+            % 2D trajectory with time coloring (actual)
+            subplot(1, 2, 1);
+            scatter(obj.O_his(1, :), obj.O_his(2, :), 30, t, 'filled');
+            hold on;
+            if ~isempty(obj.Odes_his)
+                plot(obj.Odes_his(1, :), obj.Odes_his(2, :), 'r--', 'LineWidth', 1.5);
+            end
+            colorbar;
+            colormap('jet');
+            grid on;
+            axis equal;
+            xlabel('X (mm)', 'FontName', 'Times New Roman', 'FontSize', 11);
+            ylabel('Y (mm)', 'FontName', 'Times New Roman', 'FontSize', 11);
+            title('End-Effector 2D Trajectory (Actual)', 'FontName', 'Times New Roman', 'FontSize', 12);
+            cbar = colorbar;
+            ylabel(cbar, 'Time (s)', 'FontName', 'Times New Roman', 'FontSize', 10);
+            
+            % 2D desired vs actual comparison
+            subplot(1, 2, 2);
+            plot(obj.O_his(1, :), obj.O_his(2, :), 'b-', 'LineWidth', 2); hold on;
+            if ~isempty(obj.Odes_his)
+                plot(obj.Odes_his(1, :), obj.Odes_his(2, :), 'r--', 'LineWidth', 2);
+                legend('Actual', 'Desired', 'Location', 'best', 'FontName', 'Times New Roman');
+            end
+            grid on;
+            axis equal;
+            xlabel('X (mm)', 'FontName', 'Times New Roman', 'FontSize', 11);
+            ylabel('Y (mm)', 'FontName', 'Times New Roman', 'FontSize', 11);
+            title('End-Effector 2D Trajectory Comparison', 'FontName', 'Times New Roman', 'FontSize', 12);
         end
         
         function saveResults(obj, filename)

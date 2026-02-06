@@ -165,3 +165,5 @@ All the matrices mentioned above are defined in the `Manipulator` class.
 - `G`: gravityTorque
 
 
+### Todo
+Add complete support of multiple robots

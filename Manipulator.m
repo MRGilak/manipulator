@@ -36,6 +36,12 @@ classdef Manipulator < handle
         % Inverse kinematics trajectory tracking
         R_d_prev   % Previous desired rotation matrix
         O_d_prev   % Previous desired position
+        
+        % Environmental constraints
+        J_e        % Environment Jacobian (m x 6, where m is number of constraints)
+        J_e_prev   % Previous environment Jacobian for computing J_e_dot
+        lambda_his % Constraint force multipliers history
+        F_his      % Constraint forces history
     end
 
     methods
@@ -54,6 +60,12 @@ classdef Manipulator < handle
             obj.qdot_his = zeros(obj.n,1);
             obj.qddot_his = zeros(obj.n,1);
             obj.u_his = zeros(obj.n,1);
+            
+            % Environmental constraints
+            obj.J_e = [];
+            obj.J_e_prev = [];
+            obj.lambda_his = [];
+            obj.F_his = [];
 
             % Base pose
             if nargin > 4
@@ -419,6 +431,84 @@ classdef Manipulator < handle
             g = obj.gravityVector();
             G = J' * g;
         end
+        
+        %% Set environment Jacobian
+        function setEnvironmentJacobian(obj, J_e)
+            % J_e: m x 6 matrix where m is number of constraints
+            % Constraints of form: J_e * [v; omega] = 0
+            obj.J_e = J_e;
+            obj.J_e_prev = J_e;
+        end
+        
+        %% Time derivative of environment Jacobian
+        function J_e_dot = environmentJacobianDot(obj, dt)
+            % Numerical differentiation of environment Jacobian
+            if isempty(obj.J_e_prev) || size(obj.J_e_prev,1) ~= size(obj.J_e,1) || size(obj.J_e_prev,2) ~= size(obj.J_e,2)
+                J_e_dot = zeros(size(obj.J_e));
+            else
+                J_e_dot = (obj.J_e - obj.J_e_prev) / dt;
+            end
+            obj.J_e_prev = obj.J_e;
+        end
+        
+        %% Constrained dynamics
+        function [qddot, lambda, F] = constrainedDynamics(obj, tau, dt)  
+            if isempty(obj.J_e)
+                % No constraints, use standard dynamics
+                D = obj.inertiaMatrix();
+                C = obj.coriolisCentrifugalMatrix(dt);
+                G = obj.gravityTorque();
+                qddot = D \ (tau - C * obj.qdot - G);
+                lambda = [];
+                F = zeros(6, 1);
+                return;
+            end
+            
+            % Get dynamics matrices
+            D = obj.inertiaMatrix();
+            C = obj.coriolisCentrifugalMatrix(dt);
+            G = obj.gravityTorque();
+            
+            % Get Jacobian and its derivative
+            J = obj.jacobian();
+            
+            if isempty(obj.J_prev) || size(obj.J_prev,1) ~= size(J,1) || size(obj.J_prev,2) ~= size(J,2)
+                J_dot = zeros(size(J));
+                obj.J_prev = J;
+            else
+                J_dot = (J - obj.J_prev) / dt;
+                obj.J_prev = J;
+            end
+            
+            % Get environment Jacobian derivative
+            J_e_dot = obj.environmentJacobianDot(dt);
+            
+            % Construct augmented system matrix E
+            % E = [D, J^T * J_e^T; J_e * J, 0]
+            n = obj.n;
+            m = size(obj.J_e, 1);  % Number of constraints
+            
+            E = zeros(n + m, n + m);
+            E(1:n, 1:n) = D;
+            E(1:n, n+1:n+m) = J' * obj.J_e';
+            E(n+1:n+m, 1:n) = obj.J_e * J;
+            
+            % Construct right-hand side
+            % RHS = [tau; 0] - [C*qdot + G; J_e_dot*J*qdot + J_e*J_dot*qdot]
+            rhs1 = tau - C * obj.qdot - G;
+            rhs2 = -(J_e_dot * J * obj.qdot + obj.J_e * J_dot * obj.qdot);
+            
+            rhs = [rhs1; rhs2];
+            
+            % Solve for [qddot; lambda]
+            sol = E \ rhs;
+            
+            qddot = sol(1:n);
+            lambda = sol(n+1:n+m);
+            
+            % Compute constraint force
+            F = obj.J_e' * lambda;
+        end
 
         %% Skew-symmetric matrix
         function S = skew(~, w)
@@ -504,6 +594,60 @@ classdef Manipulator < handle
         function integrateJointVelocities(obj, dt)
             % Update q from qdot
             obj.q = obj.q + obj.qdot * dt;
+        end
+        
+        %% Inverse kinematics (position-level)
+        function q_solution = ik(obj, T_desired, q_init, varargin)
+            % Parse optional inputs
+            if nargin > 3
+                max_iter = varargin{1};
+            else
+                max_iter = 100;
+            end
+            
+            if nargin > 4
+                tol = varargin{2};
+            else
+                tol = 1e-3;
+            end
+            
+            % Initialize
+            q_solution = q_init;
+            q_save = obj.q;  % Save current state
+            
+            for iter = 1:max_iter
+                % Set current configuration
+                obj.q = q_solution;
+                
+                % Compute current end-effector pose
+                T_current = obj.fk(obj.n);
+                
+                % Compute pose error
+                p_error = T_desired(1:3, 4) - T_current(1:3, 4);
+                R_error = T_desired(1:3, 1:3) * T_current(1:3, 1:3)';
+                omega_error = obj.unskew(logm(R_error));
+                
+                % Combined error
+                error = [p_error; omega_error];
+                
+                % Check convergence
+                if norm(error) < tol
+                    break;
+                end
+                
+                % Compute Jacobian
+                J = obj.jacobian(obj.n);
+                
+                % Damped least squares update
+                lambda = 0.01;
+                dq = J' * ((J * J' + lambda^2 * eye(6)) \ error);
+                
+                % Update solution
+                q_solution = q_solution + dq;
+            end
+            
+            % Restore original state
+            obj.q = q_save;
         end
         
         %% Debug: Check if D is positive definite

@@ -38,7 +38,7 @@ function main
     
     sim.plotConfig.q = true;
     sim.plotConfig.qdot = true;
-    sim.plotConfig.u = true;  % Torque
+    % sim.plotConfig.u = true;  % Torque
     % sim.plotConfig.debugInertia = true;
     % sim.plotConfig.debugSkewSymmetry = true;
     
@@ -53,12 +53,33 @@ function main
 
     Kp = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
     Kd = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
+    Lambda = 0.005 * diag([1000, 1000, 1000, 100, 100, 100]);
+    K = 1000 * diag([1000, 1000, 1000, 100, 100, 100]);
 
     % PD controller
-    controller = Controller(robot, 'PD With Gravity Compensation', ...
-        0.01, Kp, Kd, qdes);
+    % controller = Controller(robot, 'PD', ...
+    %   0.01, Kp, Kd, qdes);
+
+    % PD controller with gravity compensation
+    % controller = Controller(robot, 'PD With Gravity Compensation', ...
+    %    0.01, Kp, Kd, qdes);
+
+    % Slotine controller
+    controller = Controller(robot, 'Slotine', ...
+        0.01, Lambda, K, qdes, qdotdes, qddotdes);
+    
+    % Actuator saturation
+    % controller.setSaturation(1e6, -1e6);  % Symmetric limits
+    % controller.setSaturation([1e6; 1e6; 1e6; 1e5; 1e5; 1e5], ...
+    %                          -[1e6; 1e6; 1e6; 1e5; 1e5; 1e5]);  % Per-joint limits
 
     sim.addController(controller);
+
+    % To use constrained dynamics, set mode to 'constrained' and define J_e
+    % Example Fix end-effector Z position
+    % J_e = [0, 0, 1, 0, 0, 0];  % Only linear Z motion constrained
+    % robot.setEnvironmentJacobian(J_e);
+    % sim.mode = 'constrained';
 
     sim.run('headless', false, 'draw', false);
     

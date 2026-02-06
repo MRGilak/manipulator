@@ -1,4 +1,4 @@
-function circle_trajectory
+function force_motion_circle
     clc; close all;
 
     %% DH parameters
@@ -12,7 +12,7 @@ function circle_trajectory
 
     %% Create robot
     robot = Manipulator(a, d, alpha, jointType);
-    robot.setJointAngles([0; 0; -2*pi/3; 0; pi/3; 0]);
+    robot.setJointAngles([0; pi/2; -pi/2; 0; 0; 0]);
     % Configure link visualization
     robot.visual.linkLengths = [l1, l2, l3, l4, l5, l6];
     robot.visual.linkType = {'z', 'xy', 'xy', 'z', 'xy', 'z'};
@@ -34,7 +34,7 @@ function circle_trajectory
 
     %% Create and run simulation
     sim = Simulation(robot);
-    sim.mode = 'task-space';
+    sim.mode = 'constrained';
     
     sim.plotConfig.q = true;
     sim.plotConfig.qdot = true;
@@ -47,44 +47,37 @@ function circle_trajectory
     sim.plotConfig.saveFilename = 'sim_results.mat';  % Output filename
     sim.plotConfig.saveExcel = false;  % Set to true to also save as Excel
 
-    %% Get initial end-effector pose
-    T_init = robot.fk(robot.n);
-    O_center = T_init(1:3, 4);
-    R_d = T_init(1:3, 1:3);
-
-    %% Circle trajectory parameters
-    radius = 500;           % Circle radius (mm)
-    T_total = 25;           % Period (seconds)
+    %% Circular trajectory constraint parameters
+    % Circle parameters - 5cm radius at height 0cm (floor level)
+    radius = 50;            % Circle radius: 5cm = 50mm
+    center = [0; 500];      % Circle center: [0, 50, 0]cm = [0, 500, 0]mm in x-y
+    z0 = 0;                 % Height: 0cm (floor level)
+    omega_circle = 1;       % Angular velocity: 1 rad/sec
+    T_total = 2*pi/omega_circle;  % Period for one complete revolution
     
-    %% Create trajectory function
-    trajectoryFunc = @(t) circleTrajectory(t, T_total, R_d, O_center, radius);
-    
-    % Set trajectory tracking
-    sim.trajectoryFunc = trajectoryFunc;
-    sim.useTrajectory = true;
+    % Environment Jacobian: constrain end-effector z velocity to zero
+    J_e = [0, 0, 1, 0, 0, 0];  % Only linear z motion constrained
+    robot.setEnvironmentJacobian(J_e);
 
+    %% Desired trajectory function (respects constraint)
+    trajectoryFunc = @(t) circularConstrainedTrajectory(t, T_total, center, radius, z0);
+    
     %% Controller setup
-    % Initial desired position (will be updated by trajectory)
-    qdes = robot.q;
+    % Get initial desired configuration from inverse kinematics
+    [R_d, O_d, ~, ~] = trajectoryFunc(0);
+    T_d = [R_d, O_d; 0 0 0 1];
+    qdes = robot.ik(T_d, robot.q);
     qdotdes = zeros(6, 1);
     qddotdes = zeros(6, 1);
 
-    Kp = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
-    Kd = 100 * diag([1000, 1000, 1000, 100, 100, 100]);
-    Lambda = 0.005 * diag([1000, 1000, 1000, 100, 100, 100]);
-    K = 1000 * diag([1000, 1000, 1000, 100, 100, 100]);
+    % Desired constraint force: 2N upward from floor (in +z direction)
+    F_des = [0; 0; 2000; 0; 0; 0];  % 2N = 2000mN (force in mN units)
 
-    % PD controller
-    % controller = Controller(robot, 'PD', ...
-    %   0.01, Kp, Kd, qdes);
+    K = 0.1 * diag([1000, 1000, 1000, 100, 100, 100]);
 
-    % PD controller with gravity compensation
-    % controller = Controller(robot, 'PD With Gravity Compensation', ...
-    %  0.01, Kp, Kd, qdes);
-
-    % Slotine controller
-     controller = Controller(robot, 'Slotine', ...
-         0.01, Lambda, K, qdes, qdotdes, qddotdes);
+    % Force-motion controller
+    controller = Controller(robot, 'Force-motion', ...
+        0.01, K, qdes, qdotdes, qddotdes, F_des);
     
     % Actuator saturation (optional)
     % controller.setSaturation(1e6, -1e6);  % Symmetric limits
@@ -93,7 +86,11 @@ function circle_trajectory
 
     sim.addController(controller);
 
-    sim.run('headless', false, 'draw', true);
+    % Set up trajectory tracking callback to update desired values
+    sim.trajectoryFunc = trajectoryFunc;
+    sim.useTrajectory = true;
+
+    sim.run('headless', false, 'draw', false);
     
     % To load and plot saved results, use:
     % Simulation.loadAndPlot('sim_results.mat');
@@ -101,9 +98,22 @@ function circle_trajectory
     % Simulation.loadAndPlot('sim_results.mat', 'animate', true);
 end
 
-function [R, O] = circleTrajectory(t, T_total, R_d, O_center, radius)
-    % Circular trajectory function
-    angle = 2*pi*t/T_total;
-    O = O_center + [radius*cos(angle); radius*sin(angle); 0];
-    R = R_d;  % Keep orientation constant
+function [R, O, v, omega] = circularConstrainedTrajectory(t, T_total, center, radius, z0)
+    % Angle and its derivative (counterclockwise at 1 rad/sec)
+    theta = 2*pi*t/T_total;
+    theta_dot = 2*pi/T_total;  % This equals 1 rad/sec when T_total = 2*pi
+    
+    % Position (circular motion in x-y plane)
+    O = [center(1) + radius*cos(theta); 
+         center(2) + radius*sin(theta); 
+         z0];  % Constant height
+    
+    % Linear velocity
+    v = [-radius*sin(theta)*theta_dot;
+         radius*cos(theta)*theta_dot;
+         0];  % vz = 0 satisfies constraint
+    
+    % Keep orientation constant
+    R = [1, 0, 0; 0, 0, 1; 0, -1, 0];
+    omega = [0; 0; 0];
 end
